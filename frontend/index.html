@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="PowerTrack · Electricity Grid Command Center &amp; Smart Outage Restoration System">
+  <title>PowerTrack · Grid Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<div class="command-center">
+
+  <!-- ================= 1. GLOBAL COMMAND HEADER ================= -->
+  <header class="command-header">
+
+    <div class="brand-telemetry-group">
+      <div class="brand-shield">
+        <div class="brand-text-block">
+          <span class="brand-code-title">POWERTRACK</span>
+          <span class="brand-region-sub">GRID COMMAND CENTER</span>
+        </div>
+      </div>
+
+      <div class="header-divider-v"></div>
+
+      <div class="grid-region-badge">
+        <span class="region-dot"></span>
+        <span>Erode–Tiruppur, Tamil Nadu</span>
+      </div>
+    </div>
+
+    <!-- COMMAND SEARCH BAR -->
+    <div class="command-search-shell">
+      <div class="command-search-box">
+        <span class="search-glyph">&gt;</span>
+        <input
+          type="search"
+          id="globalCommandSearch"
+          class="search-terminal-input"
+          placeholder="Search..."
+          autocomplete="off"
+          aria-label="Command search"
+        >
+      </div>
+
+      <!-- Live Search Results Dropdown -->
+      <div class="search-results-overlay" id="searchResultsDropdown"></div>
+    </div>
+
+    <!-- RIGHT TELEMETRY ACTIONS -->
+    <div class="header-actions-group">
+      <button type="button" class="btn-trigger-fault" id="btnOpenFaultSim">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M9 1L2 9H8L7 15L14 7H8L9 1Z"/>
+        </svg>
+        Trigger Fault
+      </button>
+    </div>
+
+  </header>
+
+
+  <!-- ================= 2. GRID STATUS HUD STRIP ================= -->
+  <section class="grid-status-strip" aria-label="Grid Status Summary">
+    <div class="hud-item">
+      <span class="hud-label">Network</span>
+      <span class="hud-value healthy" id="hudNetworkStatus">Online</span>
+    </div>
+
+    <div class="hud-item">
+      <span class="hud-label">Active Outages</span>
+      <span class="hud-value" id="hudActiveOutages">0</span>
+    </div>
+
+    <div class="hud-item">
+      <span class="hud-label">Crews Available</span>
+      <span class="hud-value" id="hudCrew">6</span>
+    </div>
+  </section>
+
+
+  <!-- ================= 3. MAIN WORKSPACE VIEWPORT ================= -->
+  <main class="main-viewport-shell">
+
+    <!-- ================= VIEW 1: LIVE GRID OPERATIONS (HERO) ================= -->
+    <section class="view-section active" id="view-grid" aria-label="Live Grid Operations">
+      <div class="grid-operations-layout">
+
+        <!-- INTERACTIVE TOPOLOGY CANVAS -->
+        <div class="network-canvas-container" id="networkCanvasContainer">
+
+          <div class="canvas-toolbar">
+            <div class="canvas-title-cluster">
+              <h2>POWER DISTRIBUTION NETWORK</h2>
+              <span>Real-time outage monitoring</span>
+            </div>
+
+            <div class="canvas-controls-group">
+              <button type="button" class="btn-canvas-tool" id="btnRefreshGrid">
+                <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L9 7h7V0l-2.35 2.35z"/>
+                </svg>
+                SYNC
+              </button>
+            </div>
+          </div>
+
+          <!-- SVG TOPOLOGY DIAGRAM -->
+          <svg class="interactive-topology-svg" id="topologySvg" viewBox="0 0 1100 640" preserveAspectRatio="xMidYMid meet">
+            <!-- 1. GRID CONNECTION LINES (Circuit Hierarchy) -->
+            <g id="circuitConnectionsGroup">
+              <!-- Inter-substation tie lines -->
+              <line id="line-SS1-SS2" class="circuit-line active-current" x1="260" y1="90" x2="550" y2="90" />
+              <line id="line-SS2-SS3" class="circuit-line active-current" x1="550" y1="90" x2="840" y2="90" />
+
+              <!-- Substations to Feeders -->
+              <line id="line-SS1-FD1" class="circuit-line active-current power-flow" x1="260" y1="90" x2="260" y2="210" />
+              <line id="line-SS2-FD2" class="circuit-line active-current power-flow" x1="500" y1="90" x2="430" y2="210" />
+              <line id="line-SS2-FD3" class="circuit-line active-current power-flow" x1="600" y1="90" x2="670" y2="210" />
+              <line id="line-SS3-FD4" class="circuit-line active-current power-flow" x1="800" y1="90" x2="790" y2="210" />
+              <line id="line-SS3-FD5" class="circuit-line active-current power-flow" x1="880" y1="90" x2="930" y2="210" />
+
+              <!-- Feeders to Transformers -->
+              <line id="line-FD1-DT1" class="circuit-line active-current power-flow" x1="260" y1="210" x2="260" y2="340" />
+              <line id="line-FD2-DT2" class="circuit-line active-current power-flow" x1="430" y1="210" x2="430" y2="340" />
+              <line id="line-FD3-DT3" class="circuit-line active-current power-flow" x1="670" y1="210" x2="670" y2="340" />
+              <line id="line-FD4-DT4" class="circuit-line active-current power-flow" x1="790" y1="210" x2="790" y2="340" />
+              <line id="line-FD5-DT5" class="circuit-line active-current power-flow" x1="930" y1="210" x2="930" y2="340" />
+
+              <!-- Transformers to Consumer Delivery Areas -->
+              <line id="line-DT1-AR1" class="circuit-line active-current" x1="260" y1="340" x2="200" y2="480" />
+              <line id="line-DT1-AR2" class="circuit-line active-current" x1="260" y1="340" x2="320" y2="480" />
+              <line id="line-DT2-AR3" class="circuit-line active-current" x1="430" y1="340" x2="430" y2="480" />
+              <line id="line-DT3-AR4" class="circuit-line active-current" x1="670" y1="340" x2="670" y2="480" />
+              <line id="line-DT4-AR5" class="circuit-line active-current" x1="790" y1="340" x2="790" y2="480" />
+              <line id="line-DT5-AR6" class="circuit-line active-current" x1="930" y1="340" x2="930" y2="480" />
+            </g>
+
+            <!-- 2. GRID NODES (Substations, Feeders, Transformers, Areas) -->
+            <g id="circuitNodesGroup">
+              <!-- Tier 1: Transmission Substations -->
+              <g class="grid-node-element" id="nodeSvg-SS-ERD-01" data-node="SS-ERD-01" transform="translate(260, 90)">
+                <rect class="node-halo healthy" x="-60" y="-22" width="120" height="44" rx="3" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-58" y="-20" width="116" height="40" rx="2" />
+                <text class="node-text-id" y="4">SS-ERD-01</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-SS-PER-02" data-node="SS-PER-02" transform="translate(550, 90)">
+                <rect class="node-halo healthy" x="-60" y="-22" width="120" height="44" rx="3" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-58" y="-20" width="116" height="40" rx="2" />
+                <text class="node-text-id" y="4">SS-PER-02</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-SS-TPR-03" data-node="SS-TPR-03" transform="translate(840, 90)">
+                <rect class="node-halo healthy" x="-60" y="-22" width="120" height="44" rx="3" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-58" y="-20" width="116" height="40" rx="2" />
+                <text class="node-text-id" y="4">SS-TPR-03</text>
+              </g>
+
+              <!-- Tier 2: High-Tension Feeders -->
+              <g class="grid-node-element" id="nodeSvg-FD-ERD-01" data-node="FD-ERD-01" transform="translate(260, 210)">
+                <circle class="node-halo healthy" r="24" />
+                <circle class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" r="20" />
+                <text class="node-text-id" y="4" font-size="9">FD-ERD</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-FD-PER-02" data-node="FD-PER-02" transform="translate(430, 210)">
+                <circle class="node-halo healthy" r="24" />
+                <circle class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" r="20" />
+                <text class="node-text-id" y="4" font-size="9">FD-PER</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-FD-CHN-03" data-node="FD-CHN-03" transform="translate(670, 210)">
+                <circle class="node-halo healthy" r="24" />
+                <circle class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" r="20" />
+                <text class="node-text-id" y="4" font-size="9">FD-CHN</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-FD-AVI-04" data-node="FD-AVI-04" transform="translate(790, 210)">
+                <circle class="node-halo healthy" r="24" />
+                <circle class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" r="20" />
+                <text class="node-text-id" y="4" font-size="9">FD-AVI</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-FD-TPR-05" data-node="FD-TPR-05" transform="translate(930, 210)">
+                <circle class="node-halo healthy" r="24" />
+                <circle class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" r="20" />
+                <text class="node-text-id" y="4" font-size="9">FD-TPR</text>
+              </g>
+
+              <!-- Tier 3: Distribution Transformers -->
+              <g class="grid-node-element" id="nodeSvg-DT-ERD-101" data-node="DT-ERD-101" transform="translate(260, 340)">
+                <polygon class="node-halo healthy" points="0,-22 22,14 -22,14" />
+                <polygon class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" points="0,-18 18,11 -18,11" />
+                <text class="node-text-id" y="26" font-size="9.5">DT-101</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-DT-PER-102" data-node="DT-PER-102" transform="translate(430, 340)">
+                <polygon class="node-halo healthy" points="0,-22 22,14 -22,14" />
+                <polygon class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" points="0,-18 18,11 -18,11" />
+                <text class="node-text-id" y="26" font-size="9.5">DT-102</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-DT-CHN-103" data-node="DT-CHN-103" transform="translate(670, 340)">
+                <polygon class="node-halo healthy" points="0,-22 22,14 -22,14" />
+                <polygon class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" points="0,-18 18,11 -18,11" />
+                <text class="node-text-id" y="26" font-size="9.5">DT-103</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-DT-AVI-104" data-node="DT-AVI-104" transform="translate(790, 340)">
+                <polygon class="node-halo healthy" points="0,-22 22,14 -22,14" />
+                <polygon class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" points="0,-18 18,11 -18,11" />
+                <text class="node-text-id" y="26" font-size="9.5">DT-104</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-DT-TPR-105" data-node="DT-TPR-105" transform="translate(930, 340)">
+                <polygon class="node-halo healthy" points="0,-22 22,14 -22,14" />
+                <polygon class="node-body-shape" fill="#FAF7F2" stroke="#A88965" stroke-width="1.5" points="0,-18 18,11 -18,11" />
+                <text class="node-text-id" y="26" font-size="9.5">DT-105</text>
+              </g>
+
+              <!-- Tier 4: Consumer Localities -->
+              <g class="grid-node-element" id="nodeSvg-AREA-ERD-PR" data-node="AREA-ERD-PR" transform="translate(200, 480)">
+                <rect class="node-halo healthy" x="-45" y="-14" width="90" height="28" rx="2" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-43" y="-12" width="86" height="24" rx="2" />
+                <text class="node-text-id" y="4" font-size="9">Perundurai Rd</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-AREA-ERD-SN" data-node="AREA-ERD-SN" transform="translate(320, 480)">
+                <rect class="node-halo healthy" x="-45" y="-14" width="90" height="28" rx="2" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-43" y="-12" width="86" height="24" rx="2" />
+                <text class="node-text-id" y="4" font-size="9">Sampath Nagar</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-AREA-PER-SIP" data-node="AREA-PER-SIP" transform="translate(430, 480)">
+                <rect class="node-halo healthy" x="-45" y="-14" width="90" height="28" rx="2" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-43" y="-12" width="86" height="24" rx="2" />
+                <text class="node-text-id" y="4" font-size="9">SIPCOT Zone</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-AREA-CHN-TWN" data-node="AREA-CHN-TWN" transform="translate(670, 480)">
+                <rect class="node-halo healthy" x="-45" y="-14" width="90" height="28" rx="2" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-43" y="-12" width="86" height="24" rx="2" />
+                <text class="node-text-id" y="4" font-size="9">Chennimalai</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-AREA-AVI-BYP" data-node="AREA-AVI-BYP" transform="translate(790, 480)">
+                <rect class="node-halo healthy" x="-45" y="-14" width="90" height="28" rx="2" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-43" y="-12" width="86" height="24" rx="2" />
+                <text class="node-text-id" y="4" font-size="9">Avinashi Bypass</text>
+              </g>
+
+              <g class="grid-node-element" id="nodeSvg-AREA-TPR-RAY" data-node="AREA-TPR-RAY" transform="translate(930, 480)">
+                <rect class="node-halo healthy" x="-45" y="-14" width="90" height="28" rx="2" />
+                <rect class="node-body-shape" fill="#FAF7F2" stroke="#A88965" x="-43" y="-12" width="86" height="24" rx="2" />
+                <text class="node-text-id" y="4" font-size="9">Rayapuram</text>
+              </g>
+            </g>
+          </svg>
+
+        </div>
+
+
+        <!-- RIGHT COLUMN: TACTICAL DISPATCH & EVENT LOG STREAM -->
+        <aside class="tactical-telemetry-panel">
+
+          <div class="telemetry-header-bar">
+            <h3>Restoration Dispatch</h3>
+          </div>
+
+          <!-- Quick Dispatch Action -->
+          <div class="dispatch-action-card">
+            <div class="dispatch-fault-id" id="nextDispatchId">No active outage</div>
+            <div class="dispatch-summary">
+              <span>Priority: <strong id="nextDispatchPriority">—</strong></span>
+              <span>Affected consumers: <strong id="nextDispatchConsumers">0</strong></span>
+            </div>
+            <button type="button" class="btn-dispatch-exec" id="btnExecDispatch" disabled>
+              Dispatch Crew
+            </button>
+          </div>
+
+          <div class="telemetry-header-bar" style="border-top: 1px solid var(--border-subtle);">
+            <h3>Live Incident Stream</h3>
+          </div>
+
+          <div class="event-stream-container" id="tacticalEventStream">
+            <!-- Dynamically populated -->
+          </div>
+
+        </aside>
+
+      </div>
+    </section>
+
+
+    <!-- ================= VIEW 2: ACTIVE OUTAGES (TACTICAL TABLE) ================= -->
+    <section class="view-section" id="view-outages" aria-label="Active Outages">
+      <div class="page-view-wrapper">
+        <div class="view-headline-strip">
+          <div>
+            <h2>Active Outage Incident Registry</h2>
+            <p>Active electrical faults in the Tamil Nadu regional mesh requiring workforce assignment and grid restoration.</p>
+          </div>
+          <button type="button" class="btn-trigger-fault" id="btnSimulateOutagePage">
+            + Trigger Fault Sim
+          </button>
+        </div>
+
+        <div class="operational-table-card">
+          <table class="op-table">
+            <thead>
+              <tr>
+                <th>Incident ID</th>
+                <th>Fault Origin Node</th>
+                <th>Affected Distribution Zones</th>
+                <th>Classification &amp; Root Cause</th>
+                <th>Priority</th>
+                <th>Consumers Impacted</th>
+                <th>Field Technician</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="activeOutagesTableBody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- ================= VIEW 3: RESTORATION QUEUE ================= -->
+    <section class="view-section" id="view-queue" aria-label="Restoration Queue">
+      <div class="page-view-wrapper">
+        <div class="view-headline-strip">
+          <div>
+            <h2>Restoration Priority Queue (Max-Heap)</h2>
+            <p>Faults dynamically sorted by consumer count, healthcare criticality, and high-voltage transmission priority.</p>
+          </div>
+          <button type="button" class="btn-dispatch-exec" style="width: auto;" id="btnProcessQueuePage">
+            Dispatch Next Priority
+          </button>
+        </div>
+
+        <div class="operational-table-card">
+          <table class="op-table">
+            <thead>
+              <tr>
+                <th>Queue Pos</th>
+                <th>Outage ID</th>
+                <th>Target Component</th>
+                <th>Delivery Areas</th>
+                <th>Priority Tier</th>
+                <th>Affected Accounts</th>
+                <th>Current Status</th>
+              </tr>
+            </thead>
+            <tbody id="restorationQueueTableBody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- ================= VIEW 4: CONSUMER REGISTRY ================= -->
+    <section class="view-section" id="view-consumers" aria-label="Consumer Registry">
+      <div class="page-view-wrapper">
+        <div class="view-headline-strip">
+          <div>
+            <h2>Consumer Registry &amp; Service Feeds</h2>
+            <p>22 registered domestic, HT industrial, healthcare, institutional, and commercial electrical service accounts.</p>
+          </div>
+        </div>
+
+        <!-- Filter Bar -->
+        <div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; justify-content: space-between;">
+          <div class="command-search-box" style="width: 320px;">
+            <span class="search-glyph">&gt;</span>
+            <input type="search" id="consumerFilterInput" class="search-terminal-input" placeholder="Filter consumers by name, area, or facility...">
+          </div>
+
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;" id="consumerAreaFilterButtons">
+            <button type="button" class="btn-canvas-tool active" data-filter="all">All Areas</button>
+            <button type="button" class="btn-canvas-tool" data-filter="AREA-ERD-PR">Perundurai Rd</button>
+            <button type="button" class="btn-canvas-tool" data-filter="AREA-ERD-SN">Sampath Nagar</button>
+            <button type="button" class="btn-canvas-tool" data-filter="AREA-PER-SIP">SIPCOT Zone</button>
+            <button type="button" class="btn-canvas-tool" data-filter="AREA-CHN-TWN">Chennimalai</button>
+            <button type="button" class="btn-canvas-tool" data-filter="AREA-AVI-BYP">Avinashi</button>
+            <button type="button" class="btn-canvas-tool" data-filter="AREA-TPR-RAY">Rayapuram</button>
+          </div>
+        </div>
+
+        <div class="operational-table-card">
+          <table class="op-table">
+            <thead>
+              <tr>
+                <th>Account ID</th>
+                <th>Customer Name &amp; Facility</th>
+                <th>Connected Area</th>
+                <th>Tariff &amp; Load Category</th>
+                <th>Circuit Status</th>
+              </tr>
+            </thead>
+            <tbody id="consumerRegistryTableBody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- ================= VIEW 5: TECHNICIANS DISPATCH BOARD ================= -->
+    <section class="view-section" id="view-technicians" aria-label="Field Crew Board">
+      <div class="page-view-wrapper">
+        <div class="view-headline-strip">
+          <div>
+            <h2>Field Workforce &amp; Dispatch Board</h2>
+            <p>Regional technician crews stationed across Erode, Perundurai, Chennimalai, Tiruppur &amp; Avinashi divisions.</p>
+          </div>
+        </div>
+
+        <div class="dispatch-board-columns">
+          <!-- Column 1: Available -->
+          <div class="dispatch-col-card">
+            <div class="dispatch-col-header">
+              <h3>Available Standby Crews</h3>
+              <span class="badge-sig healthy" id="countTechAvail">0</span>
+            </div>
+            <div class="dispatch-col-content" id="techColAvailable">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+
+          <!-- Column 2: Assigned -->
+          <div class="dispatch-col-card">
+            <div class="dispatch-col-header">
+              <h3>Dispatched / En Route</h3>
+              <span class="badge-sig inprogress" id="countTechAssigned">0</span>
+            </div>
+            <div class="dispatch-col-content" id="techColAssigned">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+
+          <!-- Column 3: On Site Repair -->
+          <div class="dispatch-col-card">
+            <div class="dispatch-col-header">
+              <h3>Restoration In Progress</h3>
+              <span class="badge-sig active" id="countTechOnSite">0</span>
+            </div>
+            <div class="dispatch-col-content" id="techColOnSite">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- ================= VIEW 6: INCIDENT TIMELINE HISTORY ================= -->
+    <section class="view-section" id="view-history" aria-label="Incident History">
+      <div class="page-view-wrapper">
+        <div class="view-headline-strip">
+          <div>
+            <h2>Restoration History &amp; Incident Audit Log</h2>
+            <p>Chronological record of resolved grid outages, root cause analyses, and crew restoration metrics.</p>
+          </div>
+          <button type="button" class="btn-canvas-tool" id="btnSyncHistory">
+            Sync Audit Log
+          </button>
+        </div>
+
+        <div class="history-timeline-feed" id="historyTimelineFeed">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+    </section>
+
+
+    <!-- ================= VIEW 7: ARCHITECTURE & SPECS ================= -->
+    <section class="view-section" id="view-about" aria-label="System Architecture">
+      <div class="page-view-wrapper">
+        <div class="view-headline-strip">
+          <div>
+            <h2>System Architecture &amp; Data Structures</h2>
+            <p>Mini Project III &middot; Java Built-in HttpServer with Graph, Queue, and Priority Queue algorithms.</p>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+          <div class="operational-table-card" style="padding: 20px;">
+            <h3 style="font-family: var(--font-mono); font-size: 13px; color: var(--accent-amber); margin-bottom: 12px; text-transform: uppercase;">
+              Core Operational Concept
+            </h3>
+            <p style="font-size: 12.5px; color: var(--text-high); line-height: 1.6; margin-bottom: 12px;">
+              <strong>PowerTrack</strong> operates as a digital electricity command center simulating the regional distribution network in <strong>Tamil Nadu (Erode, Perundurai, Chennimalai, Tiruppur, Avinashi)</strong>.
+            </p>
+            <p style="font-size: 12px; color: var(--text-medium); line-height: 1.6;">
+              When faults occur, the graph connectivity engine calculates downstream electrical isolation, updates dependent consumer meters, pushes alerts to the Priority Queue (Heap), and tracks field technician dispatch through resolution.
+            </p>
+          </div>
+
+          <div class="operational-table-card" style="padding: 20px;">
+            <h3 style="font-family: var(--font-mono); font-size: 13px; color: var(--accent-amber); margin-bottom: 12px; text-transform: uppercase;">
+              Java Data Structure Mapping
+            </h3>
+            <div style="display: flex; flex-direction: column; gap: 8px; font-size: 11.5px;">
+              <div><strong style="color: var(--text-pure); font-family: var(--font-mono);">Graph (Adjacency List):</strong> <span style="color: var(--text-medium);">Models 230kV/110kV Substations &rarr; Feeders &rarr; Transformers &rarr; Areas.</span></div>
+              <div><strong style="color: var(--text-pure); font-family: var(--font-mono);">Queue (FIFO):</strong> <span style="color: var(--text-medium);">Sequential ingest of new telemetry alerts.</span></div>
+              <div><strong style="color: var(--text-pure); font-family: var(--font-mono);">Priority Queue (Heap):</strong> <span style="color: var(--text-medium);">Automated dispatch ordering based on consumer impact &amp; hospital criticality.</span></div>
+              <div><strong style="color: var(--text-pure); font-family: var(--font-mono);">Entity Arrays:</strong> <span style="color: var(--text-medium);">Fixed-capacity entity stores for high-speed indexing.</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+
+  <!-- ================= 4. FLOATING COMMAND DOCK (Bottom Nav Rail) ================= -->
+  <nav class="floating-command-dock" aria-label="Command Center Navigation">
+    <button type="button" class="dock-btn active" data-tab="view-grid">
+      <span aria-hidden="true">&#9672;</span>
+      <span>Grid</span>
+    </button>
+
+    <button type="button" class="dock-btn" data-tab="view-outages">
+      <span aria-hidden="true">&#9889;</span>
+      <span>Outages</span>
+      <span class="dock-count-chip zero" id="dockOutageCount">0</span>
+    </button>
+
+    <button type="button" class="dock-btn" data-tab="view-queue">
+      <span aria-hidden="true">&#9851;</span>
+      <span>Dispatch</span>
+    </button>
+
+    <button type="button" class="dock-btn" data-tab="view-consumers">
+      <span>&#128101;</span>
+      <span>Consumers</span>
+    </button>
+
+    <button type="button" class="dock-btn" data-tab="view-technicians">
+      <span aria-hidden="true">&#9874;</span>
+      <span>Crews</span>
+    </button>
+
+    <button type="button" class="dock-btn" data-tab="view-history">
+      <span aria-hidden="true">&#9201;</span>
+      <span>History</span>
+    </button>
+  </nav>
+
+
+  <!-- ================= 5. TELEMETRY SLIDING DETAIL DRAWER ================= -->
+  <aside class="telemetry-drawer" id="telemetryDrawer" aria-label="Node Telemetry Drawer">
+    <div class="drawer-header">
+      <h3 id="drawerNodeTitle">NODE TELEMETRY</h3>
+      <button type="button" class="btn-close-drawer" id="btnCloseDrawer" aria-label="Close drawer">&times;</button>
+    </div>
+
+    <div class="drawer-body">
+      <div>
+        <span class="badge-sig healthy" id="drawerNodeStatusBadge">OPERATIONAL</span>
+        <h2 id="drawerNodeName" style="font-size: 16px; font-weight: 700; color: var(--text-pure); margin-top: 6px;">--</h2>
+        <p id="drawerNodeId" style="font-family: var(--font-mono); font-size: 11px; color: var(--accent-amber);">--</p>
+      </div>
+
+      <div class="telemetry-kv-grid">
+        <div class="kv-block">
+          <span>Component Type</span>
+          <strong id="drawerNodeType">--</strong>
+        </div>
+        <div class="kv-block">
+          <span>Operational State</span>
+          <strong id="drawerNodeActiveState">--</strong>
+        </div>
+        <div class="kv-block">
+          <span>Connected Consumers</span>
+          <strong id="drawerNodeConsumers">--</strong>
+        </div>
+        <div class="kv-block">
+          <span>Distribution Tier</span>
+          <strong id="drawerNodeTier">--</strong>
+        </div>
+      </div>
+
+      <div>
+        <h4 style="font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px;">
+          Connected Delivery Links
+        </h4>
+        <div id="drawerDownstreamLinks" style="font-size: 12px; color: var(--text-high); background: var(--bg-command); padding: 10px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle);">
+          --
+        </div>
+      </div>
+
+      <div style="margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border-panel); display: flex; flex-direction: column; gap: 8px;">
+        <button type="button" class="btn-trigger-fault" style="width: 100%; justify-content: center;" id="btnDrawerTriggerFault">
+          Simulate Fault on This Node
+        </button>
+      </div>
+    </div>
+  </aside>
+
+
+  <!-- ================= 6. FAULT SIMULATION MODAL ================= -->
+  <div class="modal-scrim" id="faultModal" role="dialog" aria-modal="true" aria-labelledby="modalHeading">
+    <div class="modal-tactical-box">
+      <div class="modal-head">
+        <h3 id="modalHeading">FAULT SIMULATION ENGINE</h3>
+        <button type="button" class="btn-close-drawer" id="btnCloseFaultModal" aria-label="Close modal">&times;</button>
+      </div>
+
+      <form id="faultSimForm">
+        <div class="modal-content-area">
+          <p style="font-size: 12px; color: var(--text-medium); margin-bottom: 16px; line-height: 1.5;">
+            Inject a simulated equipment trip or conductor severance into the Tamil Nadu grid mesh. Watch the circuit isolate, consumers lose power, and the Max-Heap queue trigger technician dispatch.
+          </p>
+
+          <div class="form-group-tac">
+            <label for="modalSelectComponent">Target Feeder or Transformer</label>
+            <select id="modalSelectComponent" class="form-input-tac" required>
+              <option value="FD-ERD-01">FD-ERD-01 &middot; Erode North Feeder</option>
+              <option value="FD-PER-02">FD-PER-02 &middot; SIPCOT Industrial Feeder</option>
+              <option value="FD-CHN-03">FD-CHN-03 &middot; Chennimalai Feeder</option>
+              <option value="FD-AVI-04">FD-AVI-04 &middot; Avinashi Feeder</option>
+              <option value="FD-TPR-05">FD-TPR-05 &middot; Rayapuram Feeder</option>
+              <option value="DT-ERD-101">DT-ERD-101 &middot; Kumalan Kuttai Transformer</option>
+              <option value="DT-PER-102">DT-PER-102 &middot; SIPCOT Phase-I Transformer</option>
+              <option value="DT-CHN-103">DT-CHN-103 &middot; Chennimalai Town Transformer</option>
+              <option value="DT-AVI-104">DT-AVI-104 &middot; Avinashi Main Transformer</option>
+              <option value="DT-TPR-105">DT-TPR-105 &middot; Rayapuram Textile Transformer</option>
+            </select>
+          </div>
+
+          <div class="form-group-tac">
+            <label for="modalSelectFaultType">Incident Classification</label>
+            <select id="modalSelectFaultType" class="form-input-tac">
+              <option value="Feeder Trip">33kV / 11kV Feeder Tripping via Earth Fault</option>
+              <option value="Transformer Overload">Distribution Transformer Thermal Overload</option>
+              <option value="Insulator Failure">HT Bushing Insulator Flashover</option>
+              <option value="Line Fault">11kV Overhead Conductor Snap</option>
+              <option value="Cable Fault">Underground Armoured Cable Puncture</option>
+            </select>
+          </div>
+
+          <div class="form-group-tac">
+            <label for="modalSelectPriority">Restoration Priority Tier</label>
+            <select id="modalSelectPriority" class="form-input-tac">
+              <option value="High" selected>High Priority (Industrial Mills / Clinic Feeds)</option>
+              <option value="Medium">Medium Priority (Commercial Bazaar Feeds)</option>
+              <option value="Low">Low Priority (Isolated Domestic Feeds)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="modal-footer-tac">
+          <button type="button" class="btn-tac-secondary" id="btnCancelFaultModal">Cancel</button>
+          <button type="submit" class="btn-tac-primary" id="btnSubmitFault">Trigger Fault Detection</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- TOAST SHELF -->
+  <div class="toast-shelf" id="toastShelf" aria-live="polite"></div>
+
+</div>
+
+<script src="script.js"></script>
+
+</body>
+</html>
