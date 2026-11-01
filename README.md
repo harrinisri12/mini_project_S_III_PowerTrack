@@ -1,66 +1,66 @@
 # PowerTrack: Smart Electricity Outage Detection and Restoration System
 
-PowerTrack is an academic electricity distribution grid management system designed for regional grid coordination (modeled on the Tamil Nadu electrical network). It provides automated electrical fault simulation, priority-based outage queue management (with immediate priority overrides for hospitals and emergency facilities), field technician dispatch coordination, and real-time grid restoration tracking with persistent PostgreSQL database integration.
+PowerTrack is an electricity distribution grid management system designed for regional grid coordination (modeled on the Tamil Nadu regional electrical network). It provides automated electrical fault simulation, dynamic downstream Breadth-First Search (BFS) impact analysis, priority-based outage queue management (with immediate priority overrides for hospitals and essential facilities), field technician dispatch coordination, and real-time grid restoration tracking with persistent PostgreSQL database integration via JDBC.
 
 ---
 
-## 1. What PowerTrack Does
+## 1. System Overview
 
-PowerTrack simulates and manages the complete lifecycle of electricity distribution outages:
-1. **Grid Monitoring & Topology:** Models regional substations, distribution transformers, and feeders as a graph network.
-2. **Consumer Directory & Criticality:** Maintains consumer records, identifying essential facilities (hospitals, trauma centers, emergency services).
-3. **Fault Simulation:** Simulates equipment failures (e.g., transformer trips, feeder cable faults) and calculates downstream affected areas.
-4. **Dynamic Priority Queue:** Automatically evaluates outage severity; outages affecting hospitals/emergency clinics are assigned **HIGH** priority and placed at the head of the restoration queue.
+PowerTrack manages the complete lifecycle of electricity distribution grid incidents:
+1. **Grid Monitoring & Topology:** Models regional substations, distribution feeders, transformers, and locality areas as a directed graph.
+2. **Consumer Directory & Criticality:** Maintains consumer accounts and authoritative criticality ratings (Hospitals/ICU, Emergency/Water, Public/Schools, Residential, Commercial/Industrial).
+3. **Downstream BFS Fault Simulation:** Simulates equipment faults (e.g. transformer thermal overload, feeder line trips) and dynamically discovers all cascading downstream distribution areas using Breadth-First Search.
+4. **Deterministic Priority Queue:** Automatically evaluates outage severity; incidents affecting healthcare and emergency facilities are assigned **HIGH** priority (Tier 5 / Tier 4) and placed at the head of the restoration queue.
 5. **Two-Role Operational Dashboards:**
-   - **Government Dashboard:** Administrative grid oversight, fault simulation, crew assignment, consumer audits, and historical logs (direct restoration restricted to field technicians).
-   - **Technician Dashboard:** Field crew workspace for inspecting assigned outages, updating on-site progress, executing grid restoration, and logging repair notes.
-6. **Full Database Persistence:** Every outage, dispatch, consumer status, and restoration log is persistently saved to a Supabase PostgreSQL database using JDBC transactions.
+   - **Government Dashboard:** Administrative grid oversight, fault simulation, crew assignment, consumer audits, and historical logs. Direct restoration is strictly restricted to field crews.
+   - **Technician Dashboard:** Field crew workspace for inspecting assigned outages, acknowledging repairs in progress, executing grid restoration, and recording repair audit notes.
+6. **Full Database Persistence:** Every outage, crew dispatch, consumer status update, and restoration log is persistently saved to Supabase PostgreSQL using ACID-compliant JDBC transactions with connection pooling.
 
 ---
 
-## 2. Project Folder Structure & Architecture
+## 2. Project Directory Structure
 
 ```
-mini project III/
-├── .env.example                       # Sanitized template for database credentials
-├── .env                               # Active environment file (ignored in Git)
-├── .gitignore                         # Excludes .env, *.class, and logs
-├── README.md                          # Project documentation and review guide
+mini_project_S_III_PowerTrack/
+├── .env.example                       # Sanitized template for database environment variables
+├── .env                               # Local database credentials (excluded from Git)
+├── .gitignore                         # Comprehensive ignore rules (.env, *.class, IDE, OS files)
+├── README.md                          # Project documentation and setup guide
 │
-├── frontend/                          # Web Frontend (No heavy frameworks, clean HTML/CSS/JS)
+├── frontend/                          # Clean Vanilla Web Frontend (HTML5, CSS3, Vanilla ES6+)
 │   ├── index.html                     # Two-role landing page, Government & Technician dashboards
-│   ├── script.js                      # Hash routing (#government, #technician), API calls, DOM rendering
-│   └── style.css                      # Unified color theme using CSS variables
+│   ├── script.js                      # Hash routing (#government, #technician), deduplicated API calls, UI rendering
+│   └── style.css                      # Unified design system using CSS custom properties
 │
-└── backend/                           # Java Backend (Lightweight, native JDK HttpServer, JDBC)
+└── backend/                           # Java Backend (JDK HttpServer, JDBC, custom data structures)
     ├── PowerTrackServer.java          # Primary Web Application Server entry point (port 8080)
-    ├── Main.java                      # Alternative Interactive Console (CLI) entry point for viva demo
+    ├── Main.java                      # Interactive Console (CLI) test harness entry point for viva demos
     │
     ├── lib/
-    │   └── postgresql-42.7.3.jar      # Official PostgreSQL JDBC Driver
+    │   └── postgresql-42.7.3.jar      # Official PostgreSQL JDBC Driver dependency
     │
     ├── database/
-    │   ├── DatabaseConnection.java    # Reusable JDBC connection manager with SSL & IPv4 support
-    │   ├── schema.sql                 # Canonical PostgreSQL database schema (8 core tables & sample data)
-    │   └── schema_adjustments.sql     # Optional non-destructive migrations for existing databases
+    │   ├── DatabaseConnection.java    # Managed JDBC connection pool (max 12 connections, dynamic proxies)
+    │   ├── schema.sql                 # Canonical PostgreSQL schema (8 core tables & sample data)
+    │   └── schema_adjustments.sql     # Non-destructive schema helper script for existing databases
     │
     ├── datastructure/
-    │   ├── Queue.java                 # Custom Linked-List Priority Queue (implements priority ordering)
-    │   └── Graph.java                 # Custom Adjacency List Graph (BFS downstream impact & DFS pathing)
+    │   ├── Queue.java                 # Custom Linked-List Priority Queue (implements priority ordering & FIFO)
+    │   └── Graph.java                 # Custom Adjacency-List Graph (directed downstream BFS & DFS pathing)
     │
     ├── model/
-    │   ├── Consumer.java              # Consumer model with criticality levels (HIGH, MEDIUM, LOW)
-    │   ├── NetworkNode.java           # Electrical asset model (Substations, Transformers, Feeders)
-    │   ├── NetworkConnection.java     # Power line link between two network nodes
+    │   ├── Consumer.java              # Consumer model with authoritative database criticality tiers
+    │   ├── NetworkNode.java           # Electrical asset model (Substations, Feeders, Transformers, Areas)
+    │   ├── NetworkConnection.java     # Directed power line transmission connection
     │   ├── Outage.java                # Outage model implementing Comparable<Outage> for priority sorting
     │   └── Technician.java            # Field technician model with availability tracking
     │
     ├── dao/
-    │   ├── ConsumerDAO.java           # JDBC queries for consumers and locality power updates
-    │   ├── NetworkDAO.java            # JDBC queries for network nodes and transmission connections
-    │   ├── TechnicianDAO.java         # JDBC queries for technician availability and assignments
-    │   ├── OutageDAO.java             # Transactional JDBC operations for outages and restoration logs
-    │   └── StatsDAO.java              # Live grid metrics calculated directly from database records
+    │   ├── ConsumerDAO.java           # JDBC operations for consumers and locality power updates
+    │   ├── NetworkDAO.java            # JDBC operations for network nodes and grid connections
+    │   ├── TechnicianDAO.java         # JDBC operations for technician roster and availability
+    │   ├── OutageDAO.java             # Transactional JDBC operations with joined technician queries
+    │   └── StatsDAO.java              # Single-query live grid metrics with short-TTL caching
     │
     └── service/
         └── ElectricitySystem.java     # Core system coordinator linking data structures, DAOs, and business logic
@@ -68,139 +68,91 @@ mini project III/
 
 ---
 
-## 3. How Frontend Communicates with Backend
+## 3. Technology Stack
 
-1. **Lightweight Built-In Server:** The backend uses Java's native `com.sun.net.httpserver.HttpServer` listening on port `8080` (no heavy third-party web frameworks like Spring Boot are required).
-2. **REST API Endpoints:** All requests use JSON payloads over HTTP:
-   - `GET /api/network`: Retrieves all grid nodes and topology connections.
-   - `GET /api/consumers`: Retrieves consumer accounts and criticality levels.
-   - `GET /api/technicians`: Retrieves field workforce availability.
-   - `GET /api/outages/active`: Retrieves active outages and queue rankings.
-   - `GET /api/outages/history`: Retrieves completed historical restorations.
-   - `POST /api/outages/simulate`: Triggers a simulated equipment fault.
-   - `POST /api/outages/process`: Dispatches the highest-priority queued outage.
-   - `POST /api/outages/assign`: Manually assigns a technician to an outage.
-   - `POST /api/outages/update-status`: Technician updates field progress stage.
-   - `POST /api/outages/restore`: Restores power, re-energizes consumers, and logs history.
-   - `GET /api/stats`: Live grid status counts (nodes, powered consumers, active outages).
-   - `GET /api/health`: Database connectivity check (`UP` or `DOWN`).
-3. **Static File Serving:** The root path (`/`) serves `frontend/index.html`, `frontend/style.css`, and `frontend/script.js`.
-4. **No Authentication Screen:** Direct role selection between Government and Technician dashboards using hash navigation (`#government`, `#technician`).
+- **Frontend:** Semantic HTML5, CSS3 Custom Properties, Vanilla JavaScript (ES6+ with in-flight request deduplication). No external npm/Node dependencies.
+- **Backend:** Java SE (JDK 17 or later, compatible with JDK 21+), native `com.sun.net.httpserver.HttpServer`.
+- **Database:** PostgreSQL (hosted on Supabase) via JDBC.
+- **Dependencies:** `postgresql-42.7.3.jar` (packaged under `backend/lib/`).
 
 ---
 
-## 4. How Java Connects to PostgreSQL Using JDBC
+## 4. Setup and Configuration
 
-1. **JDBC Driver:** Located at `backend/lib/postgresql-42.7.3.jar`. Loaded into the JVM via `Class.forName("org.postgresql.Driver")`.
-2. **Connection Utility (`DatabaseConnection.java`):**
-   - Reads database configuration from `SUPABASE_DB_URL`, `SUPABASE_DB_USER`, and `SUPABASE_DB_PASSWORD`.
-   - Automatically ensures Supabase SSL mode (`sslmode=require`).
-   - Formats connection strings to `jdbc:postgresql://`.
-   - Strips sensitive passwords from exception messages before logging.
-3. **Data Access Objects (DAOs):**
-   - Uses `PreparedStatement` with parameterized placeholders (`?`) to prevent SQL injection.
-   - Uses atomic transactions (`conn.setAutoCommit(false)`, `conn.commit()`, and `conn.rollback()`) so that when an outage is restored, all updates (outage status, consumer power, network component, technician status, audit log) succeed together.
+### Prerequisites
+- Java Development Kit (JDK 17 or higher). Verify with:
+  ```powershell
+  javac -version
+  java -version
+  ```
+- Active Supabase PostgreSQL database project.
 
----
-
-## 5. Purpose of Key Data Structures
-
-During project review, you can explain each data structure as follows:
-
-| Data Structure | Implementation File | Role in PowerTrack |
-| :--- | :--- | :--- |
-| **Queue** | `datastructure/Queue.java` | **Priority Queue:** Manages active outages. Outages implementing `Comparable<Outage>` are sorted upon insertion so that emergencies affecting hospitals appear at the front (head) of the queue. |
-| **Graph** | `datastructure/Graph.java` | **Grid Topology:** Represents the electrical network as an Adjacency List (`HashMap<String, ArrayList<String>>`). Provides **BFS** to analyze cascading downstream feeder outages and **DFS** to trace electrical line paths. |
-| **ArrayList** | `java.util.ArrayList` | **Dynamic Collections:** Stores lists of affected areas, affected consumer IDs, critical facility tags, and database result sets without fixed array size limits. |
-| **HashMap** | `java.util.HashMap` | **O(1) Lookups:** Stores adjacency neighbor mappings in `Graph`, environment variables in `DatabaseConnection`, and connection maps in `PowerTrackServer`. |
-
----
-
-## 6. Outage Priority & Technician Restoration Logic
-
-### Priority Evaluation (`ElectricitySystem.java`)
-When a fault is simulated on a network node (e.g., `DT-01` or `FEEDER-01`):
-1. The system identifies all downstream locality areas affected using the Graph.
-2. The consumer registry is scanned for accounts in those areas.
-3. If an affected consumer has **HIGH** criticality (e.g., *Apollo Hospital*, *Government General Hospital*, *Emergency Trauma Clinic*), the entire outage is assigned **HIGH** priority.
-4. Commercial/industrial loads result in **MEDIUM** priority; residential loads result in **LOW** priority.
-5. In the Priority Queue (`Queue.java`), HIGH priority outages jump to the front of the line.
-
-### Field Restoration (`OutageDAO.java`)
-When a technician clicks **Mark as Restored** in the Technician Dashboard:
-1. `outages.status` is set to `RESTORED` and `restored_at` is set to `NOW()`.
-2. `network_nodes.is_active` is set back to `TRUE`.
-3. `consumers.power_status` in the affected areas is set back to `TRUE` (`POWER ON`).
-4. The technician is marked as `AVAILABLE` (`true`).
-5. A permanent record is inserted into `restoration_history`.
-6. Both dashboards automatically reflect the updated status on their next refresh.
-
----
-
-## 7. How to Configure the Database Safely
-
-1. Locate `.env.example` at the project root.
-2. Copy it to create `.env` (or configure `backend/.env`):
-   ```powershell
-   Copy-Item .env.example backend\.env
-   ```
-3. Fill in your Supabase connection parameters:
-   ```ini
-   SUPABASE_DB_URL=jdbc:postgresql://aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres?sslmode=require
-   SUPABASE_DB_USER=postgres.xxxxxxxxxxxxxxxxxxxx
-   SUPABASE_DB_PASSWORD=your_actual_password_here
-   ```
-4. **Security Rule:** `.env` is listed in `.gitignore` and must never be committed to GitHub or shared publicly.
-
----
-
-## 8. How to Compile and Run the Application
-
-Open **Windows PowerShell** and navigate to the project directory:
-
-### Step 1: Navigate to the `backend` directory
+### Step 1: Configure Environment Variables
+Copy `.env.example` to `.env` in the project root:
 ```powershell
-cd "d:\mini project\mini project III\backend"
+Copy-Item .env.example .env
+```
+Open `.env` and fill in your Supabase connection parameters:
+```ini
+SUPABASE_DB_URL=jdbc:postgresql://your-project-ref.pooler.supabase.com:5432/postgres?sslmode=require
+SUPABASE_DB_USER=postgres.your-project-ref
+SUPABASE_DB_PASSWORD=your_database_password
 ```
 
-### Step 2: Compile All Java Files from Scratch
+### Step 2: Initialize Database Schema (First-time Setup)
+1. Open your Supabase Dashboard and go to the **SQL Editor**.
+2. If setting up a fresh database, run the contents of `backend/database/schema.sql`.
+3. If using an existing database, run `backend/database/schema_adjustments.sql` to ensure all metadata columns and performance indexes exist.
+
+---
+
+## 5. Compilation and Execution
+
+Open **PowerShell** or Command Prompt in the project root directory:
+
+### Step 1: Navigate to the `backend` folder
 ```powershell
-javac -cp ".;lib/postgresql-42.7.3.jar" -d . model/*.java datastructure/*.java database/*.java dao/*.java service/*.java PowerTrackServer.java Main.java
+cd backend
 ```
 
-### Step 3A: Start the Web Application (Primary)
+### Step 2: Compile All Java Sources
+```powershell
+javac -cp ".;lib/postgresql-42.7.3.jar" *.java dao/*.java database/*.java datastructure/*.java model/*.java service/*.java
+```
+
+### Step 3A: Start the Web Application Server (Primary)
 ```powershell
 java -cp ".;lib/postgresql-42.7.3.jar" PowerTrackServer
 ```
-Open your browser and navigate to:
+Once started, open your web browser and visit:
 ```
 http://localhost:8080
 ```
 
-### Step 3B: Alternative Interactive Console Demo (CLI Viva Demo)
-If an examiner asks to see the core Java algorithms in the terminal without a browser:
+### Step 3B: Interactive Terminal Console Demo (CLI Demo for Viva)
+To demonstrate core Java data structures (Graph BFS, Priority Queue, Crew Dispatch) directly in the terminal without a browser:
 ```powershell
 java -cp ".;lib/postgresql-42.7.3.jar" Main
 ```
 
-### Stopping the Application
-In PowerShell, press `CTRL + C` in the running terminal window.
+### Stopping the Server
+Press `Ctrl + C` in the terminal to trigger graceful shutdown.
 
 ---
 
-## 9. Database Initialization & Schema Adjustments
+## 6. Architecture & Core Data Structures
 
-- **Canonical Schema (`backend/database/schema.sql`):**
-  Contains the complete table definitions for the 8 core tables:
-  1. `network_nodes`
-  2. `network_connections`
-  3. `consumers`
-  4. `technicians`
-  5. `outages`
-  6. `outage_affected_consumers`
-  7. `technician_assignments`
-  8. `restoration_history`
-  Along with default sample data for the regional grid. Run this script in the Supabase SQL Editor when initializing a fresh database.
+| Data Structure | Source File | Function in PowerTrack |
+| :--- | :--- | :--- |
+| **Priority Queue** | `datastructure/Queue.java` | Custom linked-list priority queue with O(1) peek/dequeue. Highest-priority incidents (hospitals/ICU) jump to the head of the queue. Equal-priority incidents follow strict FIFO ordering. |
+| **Directed Graph** | `datastructure/Graph.java` | Adjacency-list graph representing power flow (`Substation → Feeder → Transformer → Area`). Downstream Breadth-First Search (BFS) dynamically computes cascading failure impact without hardcoded maps. |
+| **Connection Pool** | `database/DatabaseConnection.java` | Controlled connection pool with dynamic reflection proxies that intercept `close()` to recycle physical connections. |
+| **Single-Query Aggregator** | `dao/StatsDAO.java` | Consolidates grid dashboard counts into a single SQL statement with short-TTL caching. |
 
-- **Schema Adjustments (`backend/database/schema_adjustments.sql`):**
-  A non-destructive script that adds optional metadata columns (`priority_reason`, `critical_facilities`, `queue_sequence`) and performance indexes to an existing database without dropping or resetting any data. Run this only if your existing database lacks these helper columns.
+---
+
+## 7. Security Best Practices
+
+- **Zero-Credential Commits:** Actual `.env` files are ignored by `.gitignore`. Only `.env.example` containing placeholder values is tracked in version control.
+- **Error Sanitization:** `DatabaseConnection.sanitizeErrorMessage()` automatically masks database passwords before logging error messages.
+- **SQL Injection Prevention:** All DAO queries strictly use parameterized `PreparedStatement` queries.

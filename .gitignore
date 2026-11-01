@@ -1,29 +1,63 @@
+# ==============================================================================
+# PowerTrack - Git Ignore Configuration
+# ==============================================================================
 
-# Environment and secret credentials
+# Environment and sensitive credentials
 .env
 .env.*
 !.env.example
 *.env
 *.env.local
 *.env.*.local
+backend/.env
+backend/.env.*
 
-# Java compiled class files
+# Java compiled bytecode (*.class)
 *.class
 **/*.class
 
-# Java build output
+# Java packaging and archives (excluding required JDBC driver)
+*.war
+*.ear
+*.nar
+*.zip
+*.tar.gz
+*.rar
+
+# Java build output directories
 target/
 build/
+bin/
 out/
+.gradle/
 
-# IDE settings
+# IDE and Editor configuration
 .vscode/
 .idea/
-
-# Logs and temporary files
-*.log
-*.tmp
+*.iml
+*.iws
+*.ipr
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
 
 # Operating system files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini
+
+# Logs, crash dumps, and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+hs_err_pid*
+replay_pid*
