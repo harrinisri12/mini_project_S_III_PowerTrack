@@ -5,6 +5,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import database.DatabaseConnection;
 import dao.ConsumerDAO;
@@ -61,6 +64,11 @@ public class ElectricitySystem {
 
     private int nextOutageId;
     private int nextQueueSequence;
+
+    // Fast area-to-consumers mapping for O(1) locality lookup
+    private final Map<String, List<Consumer>> areaConsumersMap = new ConcurrentHashMap<>();
+    // Prevents duplicate concurrent fault simulations on the same component
+    private final Set<String> activeSimulatingComponents = ConcurrentHashMap.newKeySet();
 
     // Database DAOs
     private final ConsumerDAO consumerDAO = new ConsumerDAO();
@@ -128,13 +136,14 @@ public class ElectricitySystem {
         }
     }
 
-    public synchronized void loadFromDatabase() throws SQLException {
+    public final synchronized void loadFromDatabase() throws SQLException {
         // Reset in-memory structures to mirror Supabase database directly
         consumerCount = 0;
         networkNodeCount = 0;
         outageCount = 0;
         technicianCount = 0;
         outageQueue.clear();
+        areaConsumersMap.clear();
 
         // 1. Network nodes from Supabase
         List<NetworkNode> dbNodes = networkDAO.getAllNodes();
@@ -197,6 +206,9 @@ public class ElectricitySystem {
         }
         consumers[consumerCount] = consumer;
         consumerCount++;
+        if (consumer != null && consumer.getArea() != null) {
+            areaConsumersMap.computeIfAbsent(consumer.getArea().trim().toUpperCase(), k -> new ArrayList<>()).add(consumer);
+        }
     }
 
     public synchronized void addNetworkNode(NetworkNode node) {
@@ -224,28 +236,54 @@ public class ElectricitySystem {
     }
 
     // =========================================
-    // SIMULATE FAULT (CORRECT OUTAGE WORKFLOW)
+    // SIMULATE FAULT (OPTIMIZED OUTAGE WORKFLOW)
     // =========================================
 
     /**
-     * Executes the consistent 12-step outage detection workflow:
+     * Structure holding microsecond-precision execution timings for the fault simulation pipeline.
+     */
+    public static class SimulationTimingMetrics {
+        public double validationMs;
+        public double activeVerifyMs;
+        public double bfsMs;
+        public double areaIdMs;
+        public double consumerIdMs;
+        public double critFacilityMs;
+        public double priorityCalcMs;
+        public double recordCreateMs;
+        public double dbPersistenceMs;
+        public double queueInsertMs;
+        public double apiResponseMs;
+        public double totalMs;
+    }
+
+    /**
+     * Default overload for fault simulation.
+     */
+    public Outage simulateFault(String inputComponent) {
+        return simulateFault(inputComponent, new SimulationTimingMetrics());
+    }
+
+    /**
+     * Executes the optimized, consistent outage detection and restoration pipeline:
      * 1. Validate the failed component ID.
-     * 2. Check for an existing active outage on the component.
-     * 3. Mark the component as faulty.
-     * 4. Perform downstream BFS.
-     * 5. Identify affected distribution areas dynamically.
-     * 6. Identify consumers connected to those areas.
-     * 7. Calculate the affected consumer count.
-     * 8. Identify critical facilities and their tiers.
-     * 9. Create an outage record.
-     * 10. Calculate deterministic priority.
-     * 11. Insert it into the priority queue.
-     * 12. Persist the outage in PostgreSQL transaction.
+     * 2. Check for an existing active outage.
+     * 3. Perform downstream BFS.
+     * 4. Identify affected distribution areas dynamically.
+     * 5. Identify affected consumers using in-memory area map.
+     * 6. Identify critical facilities and their tiers.
+     * 7. Calculate deterministic priority.
+     * 8. Create an outage record.
+     * 9. Persist the outage in atomic PostgreSQL transaction.
+     * 10. Priority Queue insertion and in-memory updates.
      *
      * @param inputComponent component identifier
+     * @param metrics profiler timing metrics container
      * @return the created Outage record
      */
-    public synchronized Outage simulateFault(String inputComponent) {
+    public Outage simulateFault(String inputComponent, SimulationTimingMetrics metrics) {
+        long tTotalStart = System.nanoTime();
+
         if (inputComponent == null || inputComponent.trim().isEmpty()) {
             throw new IllegalArgumentException("Failed component identifier is required.");
         }
@@ -258,7 +296,8 @@ public class ElectricitySystem {
         else if (failedComponent.equalsIgnoreCase("T1")) failedComponent = "DT-ERD-101";
         else if (failedComponent.equalsIgnoreCase("T2")) failedComponent = "DT-PER-102";
 
-        // Step 1: Validate the failed component ID
+        // Step 1: Component validation
+        long t0 = System.nanoTime();
         if (!electricityGraph.containsNode(failedComponent)) {
             throw new IllegalArgumentException("Invalid network component ID: " + failedComponent + ". Component does not exist in grid topology.");
         }
@@ -266,82 +305,181 @@ public class ElectricitySystem {
         if (failedComponent.startsWith("SS-") || failedComponent.startsWith("AREA-")) {
             throw new IllegalArgumentException("Please select a distribution feeder (FD-...) or transformer (DT-...). Substations and area endpoints cannot be simulated directly.");
         }
+        long t1 = System.nanoTime();
+        if (metrics != null) metrics.validationMs = (t1 - t0) / 1_000_000.0;
 
-        // Step 2: Check for an existing active outage
+        // Prevent simultaneous fault requests from creating duplicate outages on the same component
+        if (!activeSimulatingComponents.add(failedComponent)) {
+            throw new IllegalStateException("A fault simulation is currently in progress for component: " + failedComponent);
+        }
+
         try {
-            if (outageDAO.hasActiveOutageForComponent(failedComponent)) {
-                throw new IllegalStateException("An active or in-progress outage already exists for component: " + failedComponent + ". Component is already offline.");
+            // Step 2: Check for existing active outage (Authoritative in-memory check without WAN blocking)
+            long t2 = System.nanoTime();
+            synchronized (this) {
+                for (int i = 0; i < outageCount; i++) {
+                    if (outages[i] != null
+                            && outages[i].getFailedComponent().equalsIgnoreCase(failedComponent)
+                            && !"RESTORED".equalsIgnoreCase(outages[i].getStatus())) {
+                        throw new IllegalStateException("An active or in-progress outage already exists for component: " + failedComponent + ". Component is already offline.");
+                    }
+                }
             }
-        } catch (SQLException e) {
-            throw new RuntimeException("Database error checking existing active outages: " + DatabaseConnection.sanitizeErrorMessage(e.getMessage()), e);
-        }
+            long t3 = System.nanoTime();
+            if (metrics != null) metrics.activeVerifyMs = (t3 - t2) / 1_000_000.0;
 
-        for (int i = 0; i < outageCount; i++) {
-            if (outages[i] != null
-                    && outages[i].getFailedComponent().equalsIgnoreCase(failedComponent)
-                    && !"RESTORED".equalsIgnoreCase(outages[i].getStatus())) {
-                throw new IllegalStateException("An active or in-progress outage already exists in memory for component: " + failedComponent);
+            // Step 3: Perform downstream BFS traversal
+            long t4 = System.nanoTime();
+            ArrayList<String> downstreamNodes = electricityGraph.bfs(failedComponent);
+            long t5 = System.nanoTime();
+            if (metrics != null) metrics.bfsMs = (t5 - t4) / 1_000_000.0;
+
+            // Step 4: Identify affected distribution areas dynamically
+            long t6 = System.nanoTime();
+            ArrayList<String> affectedAreas = electricityGraph.extractAreas(downstreamNodes, failedComponent);
+            if (affectedAreas.isEmpty()) {
+                throw new IllegalStateException("No downstream affected distribution areas discovered for component: " + failedComponent);
             }
+            long t7 = System.nanoTime();
+            if (metrics != null) metrics.areaIdMs = (t7 - t6) / 1_000_000.0;
+
+            // Step 5: Affected consumer identification using high-performance area-to-consumer mapping
+            long t8 = System.nanoTime();
+            int affectedConsumerCount = countAffectedConsumers(affectedAreas);
+            List<Consumer> affectedConsumersList = new ArrayList<>(affectedConsumerCount);
+            List<Integer> affectedConsumerIds = new ArrayList<>(affectedConsumerCount);
+            for (String area : affectedAreas) {
+                List<Consumer> list = areaConsumersMap.get(area.trim().toUpperCase());
+                if (list != null) {
+                    for (Consumer c : list) {
+                        affectedConsumersList.add(c);
+                        affectedConsumerIds.add(c.getConsumerId());
+                    }
+                }
+            }
+            long t9 = System.nanoTime();
+            if (metrics != null) metrics.consumerIdMs = (t9 - t8) / 1_000_000.0;
+
+            // Step 6: Critical facility identification across affected consumers
+            long t10 = System.nanoTime();
+            ArrayList<String> criticalFacilities = new ArrayList<>();
+            ArrayList<String> tier5Facilities = new ArrayList<>();
+            ArrayList<String> tier4Facilities = new ArrayList<>();
+            ArrayList<String> tier3Facilities = new ArrayList<>();
+
+            int highestTier = 1;
+            for (Consumer c : affectedConsumersList) {
+                int tier = c.getCriticalityTier();
+                if (tier == 5) {
+                    tier5Facilities.add(c.getName());
+                    criticalFacilities.add("[HOSPITAL] " + c.getName());
+                    if (highestTier < 5) highestTier = 5;
+                } else if (tier == 4) {
+                    tier4Facilities.add(c.getName());
+                    criticalFacilities.add("[EMERGENCY] " + c.getName());
+                    if (highestTier < 4) highestTier = 4;
+                } else if (tier == 3) {
+                    tier3Facilities.add(c.getName());
+                    criticalFacilities.add("[PUBLIC] " + c.getName());
+                    if (highestTier < 3) highestTier = 3;
+                } else if (tier == 2) {
+                    if (highestTier < 2) highestTier = 2;
+                }
+            }
+            long t11 = System.nanoTime();
+            if (metrics != null) metrics.critFacilityMs = (t11 - t10) / 1_000_000.0;
+
+            // Step 7: Deterministic five-tier priority calculation
+            long t12 = System.nanoTime();
+            String priority;
+            String priorityReason;
+
+            if (highestTier == 5) {
+                priority = "HIGH";
+                priorityReason = "HIGH PRIORITY (Tier 1 of Restoration Queue): Hospital and emergency medical facilities affected ("
+                    + String.join(", ", tier5Facilities) + "). Immediate priority override applied.";
+            } else if (highestTier == 4) {
+                priority = "HIGH";
+                priorityReason = "HIGH PRIORITY (Tier 2 of Restoration Queue): Emergency services and critical public infrastructure affected ("
+                    + String.join(", ", tier4Facilities) + "). Immediate dispatch required.";
+            } else if (highestTier == 3) {
+                priority = "MEDIUM";
+                priorityReason = "MEDIUM PRIORITY (Tier 3 of Restoration Queue): Essential public services & educational institutions affected ("
+                    + String.join(", ", tier3Facilities) + "). Expedited restoration scheduled.";
+            } else if (highestTier == 2) {
+                priority = "LOW";
+                priorityReason = "LOW PRIORITY (Tier 4 of Restoration Queue): Residential consumer cluster affected ("
+                    + affectedConsumerCount + " domestic accounts de-energized). Scheduled per queue position.";
+            } else {
+                priority = "LOW";
+                priorityReason = "LOW PRIORITY (Tier 5 of Restoration Queue): Commercial & industrial power distribution affected ("
+                    + affectedConsumerCount + " accounts). Standard restoration sequencing.";
+            }
+            long t13 = System.nanoTime();
+            if (metrics != null) metrics.priorityCalcMs = (t13 - t12) / 1_000_000.0;
+
+            // Step 8: Outage record creation
+            long t14 = System.nanoTime();
+            String faultType = failedComponent.startsWith("DT-")
+                ? "Transformer Core Overload & Oil Breakdown"
+                : "High-Tension Line Fault & Circuit Breaker Trip";
+
+            int assignedOutageId;
+            int assignedSeq;
+            synchronized (this) {
+                assignedOutageId = nextOutageId;
+                assignedSeq = nextQueueSequence;
+            }
+
+            Outage outage = new Outage(
+                assignedOutageId,
+                failedComponent,
+                faultType,
+                affectedAreas,
+                affectedConsumerCount
+            );
+
+            outage.setPriority(priority);
+            outage.setPriorityTier(highestTier);
+            outage.setCriticalFacilities(criticalFacilities);
+            outage.setPriorityReason(priorityReason);
+            outage.setQueueSequence(assignedSeq);
+            outage.setStatus("ACTIVE");
+            long t15 = System.nanoTime();
+            if (metrics != null) metrics.recordCreateMs = (t15 - t14) / 1_000_000.0;
+
+            // Step 9: Database persistence using atomic PostgreSQL transaction
+            long t16 = System.nanoTime();
+            try {
+                outageDAO.insertOutageTransaction(outage, affectedConsumerIds);
+            } catch (SQLException e) {
+                String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
+                System.err.println("[PowerTrack Database Error] Failed to persist outage to Supabase: " + sanitized);
+                throw new RuntimeException("Database error persisting outage to Supabase: " + sanitized, e);
+            }
+            long t17 = System.nanoTime();
+            if (metrics != null) metrics.dbPersistenceMs = (t17 - t16) / 1_000_000.0;
+
+            // Step 10: Priority Queue insertion and in-memory updates
+            long t18 = System.nanoTime();
+            synchronized (this) {
+                nextQueueSequence++;
+                updateConsumerPower(affectedAreas);
+                outageQueue.enqueue(outage);
+                addOutage(outage);
+                nextOutageId++;
+                setNodeStatus(failedComponent, false);
+            }
+            long t19 = System.nanoTime();
+            if (metrics != null) {
+                metrics.queueInsertMs = (t19 - t18) / 1_000_000.0;
+                metrics.totalMs = (t19 - tTotalStart) / 1_000_000.0;
+            }
+
+            return outage;
+        } finally {
+            activeSimulatingComponents.remove(failedComponent);
         }
-
-        // Step 3: Mark the component as faulty in memory and topology
-        setNodeStatus(failedComponent, false);
-
-        // Step 4 & 5: Perform downstream BFS and identify affected distribution areas dynamically
-        ArrayList<String> affectedAreas = electricityGraph.getDownstreamAreas(failedComponent);
-
-        if (affectedAreas.isEmpty()) {
-            setNodeStatus(failedComponent, true);
-            throw new IllegalStateException("No downstream affected distribution areas discovered for component: " + failedComponent);
-        }
-
-        // Step 6 & 7: Identify consumers connected to those areas and count them
-        int affectedConsumerCount = countAffectedConsumers(affectedAreas);
-
-        // Step 8 & 10: Identify critical facilities and calculate deterministic priority
-        OutagePriorityEvaluation eval = evaluateOutagePriority(affectedAreas, affectedConsumerCount);
-
-        // Step 9: Create outage record
-        String faultType = failedComponent.startsWith("DT-")
-            ? "Transformer Core Overload & Oil Breakdown"
-            : "High-Tension Line Fault & Circuit Breaker Trip";
-
-        Outage outage = new Outage(
-            nextOutageId,
-            failedComponent,
-            faultType,
-            affectedAreas,
-            affectedConsumerCount
-        );
-
-        outage.setPriority(eval.getPriority());
-        outage.setPriorityTier(eval.getPriorityTier());
-        outage.setCriticalFacilities(eval.getCriticalFacilities());
-        outage.setPriorityReason(eval.getPriorityReason());
-        outage.setQueueSequence(nextQueueSequence);
-        outage.setStatus("ACTIVE");
-
-        // Step 12: Persist outage in PostgreSQL FIRST using atomic transaction
-        // Memory state is updated only AFTER successful database commit to ensure complete consistency
-        try {
-            List<Integer> affectedIds = consumerDAO.getConsumerIdsByAreas(affectedAreas, null);
-            outageDAO.insertOutageTransaction(outage, affectedIds);
-        } catch (SQLException e) {
-            // Rollback node status on failure; no other in-memory state was modified yet
-            setNodeStatus(failedComponent, true);
-            String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
-            System.err.println("[PowerTrack Database Error] Failed to persist outage to Supabase: " + sanitized);
-            throw new RuntimeException("Database error persisting outage to Supabase: " + sanitized, e);
-        }
-
-        // Database transaction committed successfully — now apply in-memory updates
-        nextQueueSequence++;
-        updateConsumerPower(affectedAreas);
-        outageQueue.enqueue(outage);
-        addOutage(outage);
-        nextOutageId++;
-
-        return outage;
     }
 
     // =========================================
@@ -352,34 +490,38 @@ public class ElectricitySystem {
         return electricityGraph.getDownstreamAreas(failedComponent);
     }
 
-    private int countAffectedConsumers(ArrayList<String> affectedAreas) {
+    public int countAffectedConsumers(ArrayList<String> affectedAreas) {
         if (affectedAreas == null || affectedAreas.isEmpty()) return 0;
-        HashSet<String> areaSet = new HashSet<>(affectedAreas);
         int count = 0;
-        for (int i = 0; i < consumerCount; i++) {
-            if (consumers[i] != null && areaSet.contains(consumers[i].getArea())) {
-                count++;
+        for (String area : affectedAreas) {
+            List<Consumer> list = areaConsumersMap.get(area.trim().toUpperCase());
+            if (list != null) {
+                count += list.size();
             }
         }
         return count;
     }
 
-    private void updateConsumerPower(ArrayList<String> affectedAreas) {
+    public void updateConsumerPower(ArrayList<String> affectedAreas) {
         if (affectedAreas == null || affectedAreas.isEmpty()) return;
-        HashSet<String> areaSet = new HashSet<>(affectedAreas);
-        for (int i = 0; i < consumerCount; i++) {
-            if (consumers[i] != null && areaSet.contains(consumers[i].getArea())) {
-                consumers[i].setPowerAvailable(false);
+        for (String area : affectedAreas) {
+            List<Consumer> list = areaConsumersMap.get(area.trim().toUpperCase());
+            if (list != null) {
+                for (Consumer c : list) {
+                    c.setPowerAvailable(false);
+                }
             }
         }
     }
 
-    private void restoreConsumerPower(ArrayList<String> affectedAreas) {
+    public void restoreConsumerPower(ArrayList<String> affectedAreas) {
         if (affectedAreas == null || affectedAreas.isEmpty()) return;
-        HashSet<String> areaSet = new HashSet<>(affectedAreas);
-        for (int i = 0; i < consumerCount; i++) {
-            if (consumers[i] != null && areaSet.contains(consumers[i].getArea())) {
-                consumers[i].setPowerAvailable(true);
+        for (String area : affectedAreas) {
+            List<Consumer> list = areaConsumersMap.get(area.trim().toUpperCase());
+            if (list != null) {
+                for (Consumer c : list) {
+                    c.setPowerAvailable(true);
+                }
             }
         }
     }

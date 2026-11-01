@@ -16,12 +16,18 @@ ALTER TABLE outages ADD COLUMN IF NOT EXISTS queue_sequence INT NOT NULL DEFAULT
 ALTER TABLE outages ADD COLUMN IF NOT EXISTS assigned_technician_id INT REFERENCES technicians(technician_id);
 ALTER TABLE outages ADD COLUMN IF NOT EXISTS assigned_technician_name VARCHAR(100);
 
--- 3. High-performance indexes for frequent queries, status filters & joins
+-- 3. Ensure technicians has contact and assignment area helper columns
+ALTER TABLE technicians ADD COLUMN IF NOT EXISTS phone VARCHAR(30);
+ALTER TABLE technicians ADD COLUMN IF NOT EXISTS email VARCHAR(100);
+ALTER TABLE technicians ADD COLUMN IF NOT EXISTS assigned_area VARCHAR(100);
+
+-- 4. High-performance indexes for frequent queries, status filters & joins
 CREATE INDEX IF NOT EXISTS idx_outages_status ON outages(status);
 CREATE INDEX IF NOT EXISTS idx_outages_priority ON outages(priority);
 CREATE INDEX IF NOT EXISTS idx_outages_reported_at ON outages(reported_at);
 CREATE INDEX IF NOT EXISTS idx_outages_queue_seq ON outages(queue_sequence);
 CREATE INDEX IF NOT EXISTS idx_outages_fault_component ON outages(fault_component_id);
+CREATE INDEX IF NOT EXISTS idx_outages_comp_status ON outages(fault_component_id, status);
 CREATE INDEX IF NOT EXISTS idx_outages_status_reported ON outages(status, reported_at);
 
 CREATE INDEX IF NOT EXISTS idx_consumers_locality ON consumers(grid_locality_area);

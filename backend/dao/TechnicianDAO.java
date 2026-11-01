@@ -38,32 +38,44 @@ public class TechnicianDAO {
             }
 
             List<Technician> list = new ArrayList<>();
-            String sql = "SELECT technician_id, technician_name, specialization, availability_status " +
-                         "FROM technicians ORDER BY technician_id ASC";
 
-            try (Connection conn = DatabaseConnection.getConnection();
-                 PreparedStatement stmt = conn.prepareStatement(sql);
-                 ResultSet rs = stmt.executeQuery()) {
+            try (Connection conn = DatabaseConnection.getConnection()) {
+                boolean hasPhone = DatabaseConnection.columnExists(conn, "technicians", "phone");
+                boolean hasEmail = DatabaseConnection.columnExists(conn, "technicians", "email");
+                boolean hasArea = DatabaseConnection.columnExists(conn, "technicians", "assigned_area");
 
-                while (rs.next()) {
-                    int id = rs.getInt("technician_id");
-                    String name = rs.getString("technician_name");
-                    String spec = rs.getString("specialization");
+                StringBuilder sql = new StringBuilder("SELECT technician_id, technician_name, specialization, availability_status");
+                if (hasPhone) sql.append(", phone");
+                if (hasEmail) sql.append(", email");
+                if (hasArea) sql.append(", assigned_area");
+                sql.append(" FROM technicians ORDER BY technician_id ASC");
 
-                    boolean avail = true;
-                    Object availObj = rs.getObject("availability_status");
-                    if (availObj != null) {
-                        if (availObj instanceof Boolean) {
-                            avail = (Boolean) availObj;
-                        } else {
-                            String val = availObj.toString().trim();
-                            avail = "true".equalsIgnoreCase(val) || "AVAILABLE".equalsIgnoreCase(val) || "t".equalsIgnoreCase(val);
+                try (PreparedStatement stmt = conn.prepareStatement(sql.toString());
+                     ResultSet rs = stmt.executeQuery()) {
+
+                    while (rs.next()) {
+                        int id = rs.getInt("technician_id");
+                        String name = rs.getString("technician_name");
+                        String spec = rs.getString("specialization");
+
+                        boolean avail = true;
+                        Object availObj = rs.getObject("availability_status");
+                        if (availObj != null) {
+                            if (availObj instanceof Boolean) {
+                                avail = (Boolean) availObj;
+                            } else {
+                                String val = availObj.toString().trim();
+                                avail = "true".equalsIgnoreCase(val) || "AVAILABLE".equalsIgnoreCase(val) || "t".equalsIgnoreCase(val);
+                            }
                         }
-                    }
 
-                    Technician t = new Technician(id, name, spec);
-                    t.setAvailable(avail);
-                    list.add(t);
+                        String phone = hasPhone ? rs.getString("phone") : null;
+                        String email = hasEmail ? rs.getString("email") : null;
+                        String area = hasArea ? rs.getString("assigned_area") : null;
+
+                        Technician t = new Technician(id, name, spec, avail, phone, email, area, 0);
+                        list.add(t);
+                    }
                 }
             }
 

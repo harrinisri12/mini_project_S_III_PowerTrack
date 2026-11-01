@@ -21,6 +21,17 @@
     let selectedTechnicianId = "ALL";
     let backendOnline = false;
 
+    // Technician Dashboard & Filter State
+    let cachedTechniciansList = [];
+    let techFilterSearchQuery = "";
+    let techFilterStatus = "ALL";
+
+    function formatTechId(id) {
+        if (!id) return "";
+        const str = String(id).trim();
+        return str.startsWith("T") ? str : `T${str}`;
+    }
+
     // Government Dashboard Operations Metadata (Operations 1 to 7)
     // Note: Restoration control is strictly assigned to Technician Dashboard
     const GOV_OPERATIONS = {
@@ -272,7 +283,7 @@
             if (techView) techView.classList.add("active-view");
             // Run independent initialization requests concurrently
             Promise.all([
-                loadTechnicianRosterOptions(),
+                loadTechnicianRosterOptions(true),
                 loadTechnicianContent(),
                 updateSystemMetrics()
             ]);
@@ -601,9 +612,9 @@
                         <tbody>
                             ${technicians.map(t => `
                                 <tr>
-                                    <td><strong>T${escapeHtml(String(t.id))}</strong></td>
+                                    <td><strong>${escapeHtml(formatTechId(t.technicianId || t.id))}</strong></td>
                                     <td>${escapeHtml(t.name)}</td>
-                                    <td>${escapeHtml(t.specialization)}</td>
+                                    <td>${escapeHtml(t.specialization || t.skills)}</td>
                                     <td>
                                         <span class="badge ${t.available ? "badge-restored" : "badge-in-progress"}">
                                             ${t.available ? "AVAILABLE ON STANDBY" : "DISPATCHED / ACTIVE ON SITE"}
@@ -684,9 +695,13 @@
         container.innerHTML = html;
 
         const form = document.getElementById("gov-simulate-fault-form");
+        let isSimulatingFault = false;
+
         if (form) {
             form.addEventListener("submit", async (e) => {
                 e.preventDefault();
+                if (isSimulatingFault) return;
+
                 const selectElem = document.getElementById("gov-fault-component-select");
                 const inputElem = document.getElementById("gov-fault-component-input");
                 const resultBox = document.getElementById("gov-simulate-result-box");
@@ -704,6 +719,7 @@
                 const confirmed = confirm(`Simulate electrical fault on component ${componentId}?`);
                 if (!confirmed) return;
 
+                isSimulatingFault = true;
                 if (submitBtn) {
                     submitBtn.disabled = true;
                     submitBtn.textContent = "Simulating...";
@@ -724,6 +740,16 @@
                             : "<li>None detected</li>";
 
                         const isHigh = (out.priority || "").toUpperCase() === "HIGH";
+
+                        // Update select dropdown option in-place to reflect fault
+                        if (selectElem) {
+                            for (let opt of selectElem.options) {
+                                if (opt.value === componentId) {
+                                    opt.text = opt.text.replace("[OPERATIONAL]", "[FAULT / OFFLINE]");
+                                    break;
+                                }
+                            }
+                        }
 
                         resultBox.innerHTML = `
                             <div class="notice-box success">
@@ -764,6 +790,7 @@
                         </div>
                     `;
                 } finally {
+                    isSimulatingFault = false;
                     if (submitBtn) {
                         submitBtn.disabled = false;
                         submitBtn.textContent = "Simulate Fault Detection & Enqueue";
@@ -933,7 +960,7 @@
                                 <select id="gov-assign-tech-select" class="form-select" ${availableTechs.length === 0 ? "disabled" : ""}>
                                     ${availableTechs.length > 0 ? availableTechs.map(t => `
                                         <option value="${t.id}">
-                                            T${t.id}: ${escapeHtml(t.name)} (${escapeHtml(t.specialization)})
+                                            ${formatTechId(t.id)}: ${escapeHtml(t.name)} (${escapeHtml(t.specialization || t.skills)})
                                         </option>
                                     `).join("") : '<option value="">No standby technicians available</option>'}
                                 </select>
@@ -982,6 +1009,7 @@
                         } else {
                             resultBox.innerHTML = `<div class="notice-box error">${escapeHtml(result.message || "Dispatch failed.")}</div>`;
                         }
+                        cachedTechniciansList = [];
                         updateSystemMetrics();
                         renderGovOperation6(container);
                     } catch (err) {
@@ -1034,6 +1062,7 @@
                         } else {
                             resultBox.innerHTML = `<div class="notice-box error">${escapeHtml(result.message || "Assignment failed.")}</div>`;
                         }
+                        cachedTechniciansList = [];
                         updateSystemMetrics();
                         renderGovOperation6(container);
                     } catch (err) {
@@ -1123,28 +1152,204 @@
     // TECHNICIAN DASHBOARD WORKSPACE LOGIC
     // =========================================================
 
-    async function loadTechnicianRosterOptions() {
+    async function loadTechnicianRosterOptions(forceRefresh = false) {
         try {
-            const technicians = await apiRequest("/api/technicians").catch(() => []);
+            if (forceRefresh || cachedTechniciansList.length === 0) {
+                const technicians = await apiRequest("/api/technicians").catch(() => []);
+                if (Array.isArray(technicians)) {
+                    cachedTechniciansList = technicians;
+                }
+            }
+
             const selector = document.getElementById("tech-crew-selector");
             if (!selector) return;
 
-            const currentVal = selector.value || "ALL";
+            const searchLower = (techFilterSearchQuery || "").toLowerCase().trim();
+            const filteredTechnicians = cachedTechniciansList.filter(t => {
+                // Status filter
+                if (techFilterStatus === "AVAILABLE" && !t.available) return false;
+                if (techFilterStatus === "BUSY" && t.available) return false;
+
+                // Search query filter: Name, ID, Specialization/Skills, Assigned Area
+                if (searchLower) {
+                    const idStr = String(t.technicianId || t.id || "").toLowerCase();
+                    const nameStr = String(t.name || "").toLowerCase();
+                    const specStr = String(t.specialization || t.skills || "").toLowerCase();
+                    const areaStr = String(t.assignedArea || "").toLowerCase();
+                    const matches = idStr.includes(searchLower) ||
+                                    nameStr.includes(searchLower) ||
+                                    specStr.includes(searchLower) ||
+                                    areaStr.includes(searchLower);
+                    if (!matches) return false;
+                }
+                return true;
+            });
+
+            const currentVal = selector.value || selectedTechnicianId || "ALL";
             let optionsHtml = '<option value="ALL">All Field Crews (Global Restoration View)</option>';
 
-            if (Array.isArray(technicians)) {
-                technicians.forEach(t => {
-                    const statusStr = t.available ? "Standby" : "Active on Site";
-                    optionsHtml += `<option value="${t.id}" ${currentVal === String(t.id) ? "selected" : ""}>
-                        T${t.id}: ${escapeHtml(t.name)} (${escapeHtml(t.specialization)}) - [${statusStr}]
-                    </option>`;
-                });
+            filteredTechnicians.forEach(t => {
+                const techVal = String(t.technicianId || t.id);
+                const techBadge = formatTechId(t.technicianId || t.id);
+                const statusStr = t.available ? "Standby" : (t.currentWorkload > 0 ? `Active (${t.currentWorkload} tasks)` : "Active on Site");
+                const isSelected = String(currentVal) === techVal || String(currentVal) === String(t.id);
+                optionsHtml += `<option value="${techVal}" ${isSelected ? "selected" : ""}>
+                    ${escapeHtml(techBadge)}: ${escapeHtml(t.name)} (${escapeHtml(t.specialization || t.skills)}) - [${statusStr}]
+                </option>`;
+            });
+
+            if (filteredTechnicians.length === 0 && (searchLower || techFilterStatus !== "ALL")) {
+                optionsHtml += '<option value="" disabled>-- No technicians match filter --</option>';
             }
 
             selector.innerHTML = optionsHtml;
+
+            // Immediately update the Active Technician Profile display
+            renderTechnicianProfile();
         } catch (e) {
-            // Keep default
+            console.error("Failed to load technician roster options:", e);
         }
+    }
+
+    function renderTechnicianProfile() {
+        const container = document.getElementById("tech-profile-container");
+        if (!container) return;
+
+        // If "ALL" is selected, render Global Workforce Overview
+        if (selectedTechnicianId === "ALL" || !selectedTechnicianId) {
+            const total = cachedTechniciansList.length;
+            const availableCount = cachedTechniciansList.filter(t => t.available).length;
+            const busyCount = total - availableCount;
+            const totalWorkload = cachedTechniciansList.reduce((acc, t) => acc + (t.currentWorkload || 0), 0);
+
+            container.innerHTML = `
+                <div class="tech-profile-card">
+                    <div class="tech-profile-header">
+                        <div class="tech-profile-title-wrap">
+                            <h3 class="tech-profile-name">Global Field Workforce Roster</h3>
+                            <div class="tech-profile-badges">
+                                <span class="badge badge-assigned">${total} Registered Field Technicians</span>
+                                <span class="badge badge-restored">${availableCount} Standby (Ready)</span>
+                                ${busyCount > 0 ? `<span class="badge badge-in-progress">${busyCount} Active on Site</span>` : ""}
+                            </div>
+                        </div>
+                        <div style="font-size: 12px; color: var(--text-secondary);">
+                            Technician Overview &bull; Select an individual technician to inspect personal credentials and work orders
+                        </div>
+                    </div>
+                    <div class="tech-profile-grid">
+                        <div class="tech-profile-field">
+                            <span class="tech-profile-field-label">Active Field Workforce</span>
+                            <span class="tech-profile-field-val">${total} Certified Engineers &amp; Linemen</span>
+                        </div>
+                        <div class="tech-profile-field">
+                            <span class="tech-profile-field-label">Workforce Availability</span>
+                            <span class="tech-profile-field-val">${availableCount} Ready &bull; ${busyCount} Dispatched</span>
+                        </div>
+                        <div class="tech-profile-field">
+                            <span class="tech-profile-field-label">Dispatched Work Orders</span>
+                            <span class="tech-profile-field-val">${totalWorkload} Outages currently under active repair</span>
+                        </div>
+                        <div class="tech-profile-field">
+                            <span class="tech-profile-field-label">Primary Specializations</span>
+                            <span class="tech-profile-field-val">Electrical Lines, Transformers, Substation Distribution</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        // Find the selected technician
+        const cleanId = String(selectedTechnicianId).replace(/\D/g, "");
+        const tech = cachedTechniciansList.find(t =>
+            String(t.technicianId) === cleanId ||
+            String(t.id) === String(selectedTechnicianId) ||
+            String(t.id).replace(/\D/g, "") === cleanId
+        );
+
+        if (!tech) {
+            container.innerHTML = `
+                <div class="notice-box empty">
+                    Selected technician record not found in active roster. Please choose another technician.
+                </div>
+            `;
+            return;
+        }
+
+        const techDisplayId = formatTechId(tech.technicianId || tech.id);
+        const isAvail = tech.available;
+        const workload = tech.currentWorkload || 0;
+        const phone = tech.phone || ("+91 94440 " + (21000 + parseInt(cleanId || "0", 10)));
+        const email = tech.email || (tech.name ? tech.name.toLowerCase().replace(/[^a-z0-9]/g, "") + "@powertrack.tneb.gov.in" : "technician@powertrack.tneb.gov.in");
+        const area = tech.assignedArea || "Chennai Central Grid Division";
+        const skills = tech.skills || tech.specialization || "Power Grid & Electrical Restoration";
+
+        let workloadDesc = "0 Active Outages (Standby / Ready for Dispatch)";
+        if (workload > 0) {
+            if (Array.isArray(tech.activeOutages) && tech.activeOutages.length > 0) {
+                const outageTags = tech.activeOutages.map(o => `OUT-${o.outageId} (${escapeHtml(o.component)})`).join(", ");
+                workloadDesc = `${workload} Active Outage (${outageTags})`;
+            } else {
+                workloadDesc = `${workload} Active Outage Assignment(s)`;
+            }
+        }
+
+        container.innerHTML = `
+            <div class="tech-profile-card ${!isAvail ? "active-on-site" : ""}">
+                <div class="tech-profile-header">
+                    <div class="tech-profile-title-wrap">
+                        <h3 class="tech-profile-name">${escapeHtml(tech.name)}</h3>
+                        <div class="tech-profile-badges">
+                            <span class="badge badge-assigned">${escapeHtml(techDisplayId)}</span>
+                            <span class="badge ${isAvail ? "badge-restored" : "badge-in-progress"}">
+                                ${isAvail ? "&check; AVAILABLE / STANDBY" : "&#9881; ACTIVE ON SITE"}
+                            </span>
+                            <span class="badge badge-low">${escapeHtml(skills)}</span>
+                        </div>
+                    </div>
+                    <div style="font-size: 12px; color: var(--text-secondary);">
+                        Technician Profile &bull; Field Operations Roster
+                    </div>
+                </div>
+                <div class="tech-profile-grid">
+                    <div class="tech-profile-field">
+                        <span class="tech-profile-field-label">Technician ID</span>
+                        <span class="tech-profile-field-val">${escapeHtml(techDisplayId)} <span style="font-weight: 400; font-size: 11.5px; color: var(--text-secondary);">(DB Record #${tech.technicianId || tech.id})</span></span>
+                    </div>
+                    <div class="tech-profile-field">
+                        <span class="tech-profile-field-label">Personnel Name</span>
+                        <span class="tech-profile-field-val">${escapeHtml(tech.name)}</span>
+                    </div>
+                    <div class="tech-profile-field">
+                        <span class="tech-profile-field-label">Contact Phone</span>
+                        <span class="tech-profile-field-val">${escapeHtml(phone)}</span>
+                    </div>
+                    <div class="tech-profile-field">
+                        <span class="tech-profile-field-label">Email Address</span>
+                        <span class="tech-profile-field-val">${escapeHtml(email)}</span>
+                    </div>
+                    <div class="tech-profile-field">
+                        <span class="tech-profile-field-label">Availability Status</span>
+                        <span class="tech-profile-field-val" style="color: ${isAvail ? "var(--tone-success)" : "var(--color-action)"}; font-weight: 700;">
+                            ${isAvail ? "Available / Standby (Immediate Dispatch)" : "Active on Site / Dispatched"}
+                        </span>
+                    </div>
+                    <div class="tech-profile-field">
+                        <span class="tech-profile-field-label">Assigned Grid Locality / Area</span>
+                        <span class="tech-profile-field-val">${escapeHtml(area)}</span>
+                    </div>
+                    <div class="tech-profile-field">
+                        <span class="tech-profile-field-label">Skills &amp; Qualifications</span>
+                        <span class="tech-profile-field-val">${escapeHtml(skills)}</span>
+                    </div>
+                    <div class="tech-profile-field">
+                        <span class="tech-profile-field-label">Current Active Workload</span>
+                        <span class="tech-profile-field-val" style="font-weight: 700;">${workloadDesc}</span>
+                    </div>
+                </div>
+            </div>
+        `;
     }
 
     async function loadTechnicianContent() {
@@ -1176,12 +1381,22 @@
 
             // Filter by selected technician if not ALL
             let filtered = activeOutages;
-            if (selectedTechnicianId !== "ALL") {
-                const numericId = parseInt(selectedTechnicianId, 10);
-                filtered = activeOutages.filter(o =>
-                    (o.assignedTechnicianId && o.assignedTechnicianId === numericId) ||
-                    (o.technician && o.technician.toLowerCase().includes(String(selectedTechnicianId).toLowerCase()))
+            if (selectedTechnicianId !== "ALL" && selectedTechnicianId) {
+                const cleanId = parseInt(String(selectedTechnicianId).replace(/\D/g, ""), 10);
+                const selectedTech = cachedTechniciansList.find(t =>
+                    (cleanId && t.technicianId === cleanId) ||
+                    String(t.id) === String(selectedTechnicianId) ||
+                    String(t.id).replace(/\D/g, "") === String(cleanId)
                 );
+                const techNameLower = selectedTech && selectedTech.name ? selectedTech.name.toLowerCase().trim() : "";
+
+                filtered = activeOutages.filter(o => {
+                    const outTechId = o.assignedTechnicianId != null ? parseInt(String(o.assignedTechnicianId).replace(/\D/g, ""), 10) : null;
+                    if (cleanId && outTechId === cleanId) return true;
+                    if (techNameLower && o.technician && o.technician.toLowerCase().trim() === techNameLower) return true;
+                    if (o.technician && o.technician.toLowerCase().includes(String(selectedTechnicianId).toLowerCase())) return true;
+                    return false;
+                });
             }
 
             if (filtered.length === 0) {
@@ -1311,6 +1526,7 @@
                         if (result.success) {
                             alert(`Outage OUT-${outId} marked as IN PROGRESS. On-site repair active.`);
                             updateSystemMetrics();
+                            loadTechnicianRosterOptions(true);
                             loadTechnicianContent();
                         } else {
                             alert(`Error: ${result.message}`);
@@ -1348,6 +1564,7 @@
                         if (result.success) {
                             alert(`SUCCESS! Outage OUT-${outId} marked as RESTORED. Grid component reactivated and consumer power normalized.`);
                             updateSystemMetrics();
+                            loadTechnicianRosterOptions(true);
                             loadTechnicianContent();
                         } else {
                             alert(`Restoration failed: ${result.message}`);
@@ -1381,12 +1598,22 @@
             }
 
             let filtered = history.filter(h => h.status === "RESTORED");
-            if (selectedTechnicianId !== "ALL") {
-                const numericId = parseInt(selectedTechnicianId, 10);
-                filtered = filtered.filter(h =>
-                    (h.assignedTechnicianId && h.assignedTechnicianId === numericId) ||
-                    (h.technician && h.technician.toLowerCase().includes(String(selectedTechnicianId).toLowerCase()))
+            if (selectedTechnicianId !== "ALL" && selectedTechnicianId) {
+                const cleanId = parseInt(String(selectedTechnicianId).replace(/\D/g, ""), 10);
+                const selectedTech = cachedTechniciansList.find(t =>
+                    (cleanId && t.technicianId === cleanId) ||
+                    String(t.id) === String(selectedTechnicianId) ||
+                    String(t.id).replace(/\D/g, "") === String(cleanId)
                 );
+                const techNameLower = selectedTech && selectedTech.name ? selectedTech.name.toLowerCase().trim() : "";
+
+                filtered = filtered.filter(h => {
+                    const outTechId = h.assignedTechnicianId != null ? parseInt(String(h.assignedTechnicianId).replace(/\D/g, ""), 10) : null;
+                    if (cleanId && outTechId === cleanId) return true;
+                    if (techNameLower && h.technician && h.technician.toLowerCase().trim() === techNameLower) return true;
+                    if (h.technician && h.technician.toLowerCase().includes(String(selectedTechnicianId).toLowerCase())) return true;
+                    return false;
+                });
             }
 
             if (filtered.length === 0) {
@@ -1580,11 +1807,41 @@
             });
         }
 
-        // 4. Technician Dashboard Controls
+        // 4. Technician Dashboard Controls & Profile Filter
         const techSelector = document.getElementById("tech-crew-selector");
         if (techSelector) {
             techSelector.addEventListener("change", (e) => {
                 selectedTechnicianId = e.target.value;
+                renderTechnicianProfile();
+                loadTechnicianContent();
+            });
+        }
+
+        const techSearchInput = document.getElementById("tech-filter-search");
+        if (techSearchInput) {
+            techSearchInput.addEventListener("input", (e) => {
+                techFilterSearchQuery = e.target.value;
+                loadTechnicianRosterOptions(false);
+            });
+        }
+
+        const techStatusSelect = document.getElementById("tech-filter-status");
+        if (techStatusSelect) {
+            techStatusSelect.addEventListener("change", (e) => {
+                techFilterStatus = e.target.value;
+                loadTechnicianRosterOptions(false);
+            });
+        }
+
+        const techResetBtn = document.getElementById("btn-tech-reset-filter");
+        if (techResetBtn) {
+            techResetBtn.addEventListener("click", () => {
+                techFilterSearchQuery = "";
+                techFilterStatus = "ALL";
+                selectedTechnicianId = "ALL";
+                if (techSearchInput) techSearchInput.value = "";
+                if (techStatusSelect) techStatusSelect.value = "ALL";
+                loadTechnicianRosterOptions(false);
                 loadTechnicianContent();
             });
         }
@@ -1592,6 +1849,7 @@
         const techRefreshBtn = document.getElementById("btn-tech-refresh");
         if (techRefreshBtn) {
             techRefreshBtn.addEventListener("click", () => {
+                loadTechnicianRosterOptions(true);
                 loadTechnicianContent();
                 updateSystemMetrics();
             });

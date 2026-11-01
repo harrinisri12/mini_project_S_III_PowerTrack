@@ -1,11 +1,12 @@
 package datastructure;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Custom Adjacency List Graph representation of the regional electricity distribution network.
@@ -18,6 +19,8 @@ public class Graph {
     private final HashMap<String, ArrayList<String>> adjacencyList;
     // Map of Node ID to its network node type (e.g. 'SUBSTATION', 'FEEDER', 'TRANSFORMER', 'AREA')
     private final HashMap<String, String> nodeTypes;
+    // Fast lookup cache for downstream distribution areas
+    private final ConcurrentHashMap<String, ArrayList<String>> downstreamAreasCache;
 
     /**
      * Initializes an empty directed graph.
@@ -25,6 +28,7 @@ public class Graph {
     public Graph() {
         this.adjacencyList = new HashMap<>();
         this.nodeTypes = new HashMap<>();
+        this.downstreamAreasCache = new ConcurrentHashMap<>();
     }
 
     /**
@@ -40,6 +44,7 @@ public class Graph {
         String normalized = nodeId.trim().toUpperCase();
         if (!adjacencyList.containsKey(normalized)) {
             adjacencyList.put(normalized, new ArrayList<>());
+            downstreamAreasCache.clear();
         }
         if (nodeType != null && !nodeType.trim().isEmpty()) {
             nodeTypes.put(normalized, nodeType.trim().toUpperCase());
@@ -75,6 +80,7 @@ public class Graph {
         ArrayList<String> neighbors = adjacencyList.get(src);
         if (!neighbors.contains(dst)) {
             neighbors.add(dst);
+            downstreamAreasCache.clear();
         }
     }
 
@@ -153,9 +159,9 @@ public class Graph {
         }
 
         HashSet<String> visited = new HashSet<>();
-        LinkedList<String> queue = new LinkedList<>();
+        ArrayDeque<String> queue = new ArrayDeque<>();
 
-        queue.add(start);
+        queue.addLast(start);
         visited.add(start);
 
         while (!queue.isEmpty()) {
@@ -164,9 +170,9 @@ public class Graph {
 
             ArrayList<String> neighbors = adjacencyList.get(current);
             if (neighbors != null) {
-                for (String neighbor : neighbors) {
-                    if (!visited.contains(neighbor)) {
-                        visited.add(neighbor);
+                for (int i = 0; i < neighbors.size(); i++) {
+                    String neighbor = neighbors.get(i);
+                    if (visited.add(neighbor)) {
                         queue.addLast(neighbor);
                     }
                 }
@@ -177,27 +183,55 @@ public class Graph {
     }
 
     /**
+     * Extracts distribution area nodes from a pre-traversed list of nodes,
+     * excluding the start component itself.
+     *
+     * @param nodes list of visited graph nodes
+     * @param startNode starting component
+     * @return list of downstream area IDs
+     */
+    public synchronized ArrayList<String> extractAreas(ArrayList<String> nodes, String startNode) {
+        ArrayList<String> areas = new ArrayList<>();
+        if (nodes == null) return areas;
+        String startNorm = startNode != null ? startNode.trim().toUpperCase() : "";
+        HashSet<String> seen = new HashSet<>();
+
+        for (int i = 0; i < nodes.size(); i++) {
+            String node = nodes.get(i);
+            if (node == null) continue;
+            String norm = node.trim().toUpperCase();
+            if (norm.equals(startNorm)) continue;
+            String type = nodeTypes.get(norm);
+            boolean isArea = (type != null && "AREA".equalsIgnoreCase(type)) || norm.startsWith("AREA-");
+            if (isArea && seen.add(norm)) {
+                areas.add(norm);
+            }
+        }
+        return areas;
+    }
+
+    /**
      * Dynamically discovers all downstream distribution areas affected by a fault
      * at the given component, using downstream BFS traversal.
      * Uses actual network node types when registered, with ID-prefix fallback.
-     * Uses a HashSet to ensure O(1) deduplication.
+     * Uses caching to ensure instantaneous subsequent lookups.
      *
      * @param startNode component where the fault occurred
      * @return ArrayList of affected locality area IDs
      */
     public synchronized ArrayList<String> getDownstreamAreas(String startNode) {
-        ArrayList<String> affectedAreas = new ArrayList<>();
-        HashSet<String> visitedAreas = new HashSet<>();
-        ArrayList<String> downstreamNodes = bfs(startNode);
+        if (startNode == null) return new ArrayList<>();
+        String normalized = startNode.trim().toUpperCase();
 
-        for (String node : downstreamNodes) {
-            String type = nodeTypes.get(node);
-            boolean isArea = (type != null && "AREA".equalsIgnoreCase(type)) || node.startsWith("AREA-");
-            if (isArea && visitedAreas.add(node)) {
-                affectedAreas.add(node);
-            }
+        ArrayList<String> cached = downstreamAreasCache.get(normalized);
+        if (cached != null) {
+            return new ArrayList<>(cached);
         }
 
+        ArrayList<String> downstreamNodes = bfs(normalized);
+        ArrayList<String> affectedAreas = extractAreas(downstreamNodes, normalized);
+
+        downstreamAreasCache.put(normalized, new ArrayList<>(affectedAreas));
         return affectedAreas;
     }
 

@@ -70,14 +70,6 @@ public class Consumer {
     }
 
     /**
-     * Determines the detailed restoration priority tier (1 to 5):
-     * Tier 5: Hospitals and emergency medical facilities
-     * Tier 4: Emergency services and critical infrastructure (fire, water treatment)
-     * Tier 3: Essential public services and education
-     * Tier 2: Residential consumers
-     * Tier 1: Commercial & industrial consumers
-     */
-    /**
      * Determines the detailed restoration priority tier (1 to 5).
      * Uses the stored criticalityLevel from PostgreSQL as the authoritative bracket:
      * - HIGH: Tier 5 (Hospitals/medical) or Tier 4 (Emergency/critical infrastructure)

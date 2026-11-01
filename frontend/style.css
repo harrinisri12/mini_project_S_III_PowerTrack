@@ -614,6 +614,98 @@ body {
     border-color: var(--border-accent);
 }
 
+.tech-search-input {
+    padding: 7px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    background-color: #FFFFFF;
+    color: var(--text-primary);
+    min-width: 250px;
+}
+
+.tech-search-input:focus {
+    outline: 2px solid var(--border-accent);
+    border-color: var(--border-accent);
+}
+
+/* Active Technician Profile Card */
+.tech-profile-container {
+    margin-bottom: 18px;
+}
+
+.tech-profile-card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-left: 4px solid var(--color-accent);
+    border-radius: 4px;
+    padding: 18px 22px;
+    transition: border-color 0.2s ease;
+}
+
+.tech-profile-card.active-on-site {
+    border-left-color: var(--color-action);
+}
+
+.tech-profile-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 14px;
+}
+
+.tech-profile-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.tech-profile-name {
+    font-size: 16.5px;
+    font-weight: 700;
+    color: var(--color-dark);
+}
+
+.tech-profile-badges {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.tech-profile-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 14px 18px;
+}
+
+.tech-profile-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.tech-profile-field-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+}
+
+.tech-profile-field-val {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--color-dark);
+    word-break: break-word;
+}
+
 .tech-subnav {
     display: flex;
     gap: 8px;

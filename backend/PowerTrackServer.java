@@ -277,19 +277,90 @@ public class PowerTrackServer {
 
         try {
             List<Technician> list = system.getTechnicianDAO().getAllTechnicians();
+            List<Outage> activeOutages = null;
+            try {
+                activeOutages = system.getOutageDAO().getActiveOutages();
+            } catch (Exception ignored) {
+                activeOutages = new ArrayList<>();
+            }
+
+            // Map technician ID and name to active outages
+            Map<Integer, List<Outage>> techOutagesMap = new HashMap<>();
+            Map<String, List<Outage>> techNameMap = new HashMap<>();
+            if (activeOutages != null) {
+                for (Outage o : activeOutages) {
+                    if (o == null || "RESTORED".equalsIgnoreCase(o.getStatus())) continue;
+                    if (o.getAssignedTechnicianId() != null) {
+                        techOutagesMap.computeIfAbsent(o.getAssignedTechnicianId(), k -> new ArrayList<>()).add(o);
+                    }
+                    if (o.getAssignedTechnician() != null && !o.getAssignedTechnician().trim().isEmpty()
+                            && !"NOT ASSIGNED".equalsIgnoreCase(o.getAssignedTechnician().trim())) {
+                        techNameMap.computeIfAbsent(o.getAssignedTechnician().toLowerCase().trim(), k -> new ArrayList<>()).add(o);
+                    }
+                }
+            }
+
+            // Check if specific technician ID was requested via query param (?id=201 or ?id=T201)
+            String query = exchange.getRequestURI().getQuery();
+            String filterIdStr = null;
+            if (query != null && query.contains("id=")) {
+                for (String param : query.split("&")) {
+                    if (param.startsWith("id=")) {
+                        filterIdStr = param.substring(3).trim();
+                        break;
+                    }
+                }
+            }
 
             StringBuilder json = new StringBuilder("[");
-            for (int i = 0; i < list.size(); i++) {
-                Technician t = list.get(i);
-                if (i > 0) json.append(",");
+            boolean first = true;
+            for (Technician t : list) {
+                int techId = t.getTechnicianId();
+                if (filterIdStr != null && !filterIdStr.isEmpty() && !filterIdStr.equalsIgnoreCase("ALL")) {
+                    String cleanFilter = filterIdStr.replaceAll("[^0-9]", "");
+                    if (!cleanFilter.isEmpty() && techId != Integer.parseInt(cleanFilter)) {
+                        continue;
+                    }
+                }
+
+                // Associate live active outages and calculate workload
+                List<Outage> assigned = techOutagesMap.get(techId);
+                if ((assigned == null || assigned.isEmpty()) && t.getName() != null) {
+                    assigned = techNameMap.get(t.getName().toLowerCase().trim());
+                }
+                int workload = (assigned != null) ? assigned.size() : 0;
+                t.setCurrentWorkload(workload);
+                if (workload > 0) {
+                    t.setAvailable(false);
+                }
+
+                if (!first) json.append(",");
+                first = false;
 
                 json.append("{");
-                json.append("\"id\":\"T").append(t.getTechnicianId()).append("\",");
-                json.append("\"technicianId\":").append(t.getTechnicianId()).append(",");
+                json.append("\"id\":\"T").append(techId).append("\",");
+                json.append("\"technicianId\":").append(techId).append(",");
                 json.append("\"name\":\"").append(escape(t.getName())).append("\",");
                 json.append("\"specialization\":\"").append(escape(t.getSpecialization())).append("\",");
-                json.append("\"available\":").append(t.isAvailable());
-                json.append("}");
+                json.append("\"skills\":\"").append(escape(t.getSpecialization())).append("\",");
+                json.append("\"available\":").append(t.isAvailable()).append(",");
+                json.append("\"status\":\"").append(t.isAvailable() ? "AVAILABLE" : "ACTIVE ON SITE").append("\",");
+                json.append("\"phone\":\"").append(escape(t.getPhone())).append("\",");
+                json.append("\"email\":\"").append(escape(t.getEmail())).append("\",");
+                json.append("\"assignedArea\":\"").append(escape(t.getAssignedArea())).append("\",");
+                json.append("\"currentWorkload\":").append(workload).append(",");
+                json.append("\"activeOutages\":[");
+                if (assigned != null && !assigned.isEmpty()) {
+                    for (int j = 0; j < assigned.size(); j++) {
+                        if (j > 0) json.append(",");
+                        Outage ao = assigned.get(j);
+                        json.append("{\"outageId\":").append(ao.getOutageId())
+                            .append(",\"component\":\"").append(escape(ao.getFailedComponent())).append("\"")
+                            .append(",\"status\":\"").append(escape(ao.getStatus())).append("\"")
+                            .append(",\"priority\":\"").append(escape(ao.getPriority())).append("\"}");
+                    }
+                }
+                json.append("]}");
             }
             json.append("]");
 
@@ -393,14 +464,42 @@ public class PowerTrackServer {
 
             component = component.trim().toUpperCase();
 
-            // Execute the outage detection workflow directly
-            Outage outage = system.simulateFault(component);
+            // Execute the outage detection workflow directly with timing metrics
+            ElectricitySystem.SimulationTimingMetrics metrics = new ElectricitySystem.SimulationTimingMetrics();
+            Outage outage = system.simulateFault(component, metrics);
 
-            sendJson(exchange, 200, "{"
+            // Step 11: Frontend API response serialization
+            long tApiStart = System.nanoTime();
+            String responseJson = "{"
                     + "\"success\":true,"
                     + "\"message\":\"Fault simulated successfully on " + escape(component) + "\","
                     + "\"outage\":" + outageToJson(outage)
-                    + "}");
+                    + "}";
+            sendJson(exchange, 200, responseJson);
+            long tApiEnd = System.nanoTime();
+            if (metrics != null) {
+                metrics.apiResponseMs = (tApiEnd - tApiStart) / 1_000_000.0;
+                metrics.totalMs += metrics.apiResponseMs;
+
+                // Print the execution-time measurements of each operation in milliseconds
+                System.out.println("\n==================== FAULT SIMULATION PROFILER ====================");
+                System.out.printf("Component: %s | Outage: OUT-%d | Priority: %s (Tier %d)\n",
+                        outage.getFailedComponent(), outage.getOutageId(), outage.getPriority(), outage.getPriorityTier());
+                System.out.printf("  1. Component validation:                   %8.3f ms\n", metrics.validationMs);
+                System.out.printf("  2. Existing active outage verification:    %8.3f ms\n", metrics.activeVerifyMs);
+                System.out.printf("  3. Downstream BFS traversal:               %8.3f ms\n", metrics.bfsMs);
+                System.out.printf("  4. Affected area identification:           %8.3f ms\n", metrics.areaIdMs);
+                System.out.printf("  5. Affected consumer identification:       %8.3f ms\n", metrics.consumerIdMs);
+                System.out.printf("  6. Critical facility identification:       %8.3f ms\n", metrics.critFacilityMs);
+                System.out.printf("  7. Priority calculation:                   %8.3f ms\n", metrics.priorityCalcMs);
+                System.out.printf("  8. Outage record creation:                 %8.3f ms\n", metrics.recordCreateMs);
+                System.out.printf("  9. Database persistence:                   %8.3f ms\n", metrics.dbPersistenceMs);
+                System.out.printf("  10. Priority Queue insertion:              %8.3f ms\n", metrics.queueInsertMs);
+                System.out.printf("  11. Frontend API response:                 %8.3f ms\n", metrics.apiResponseMs);
+                System.out.println("-------------------------------------------------------------------");
+                System.out.printf("TOTAL FAULT SIMULATION TIME:                 %8.3f ms\n", metrics.totalMs);
+                System.out.println("===================================================================\n");
+            }
 
         } catch (IllegalArgumentException | IllegalStateException e) {
             sendJson(exchange, 400, "{"

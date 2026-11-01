@@ -200,33 +200,43 @@ public class OutageDAO {
                 stmt.executeUpdate();
             }
 
-            // 2. Associate affected consumers & update consumer power
+            // 2. Associate affected consumers & update consumer power in optimized single-query batches
             if (affectedConsumerIds != null && !affectedConsumerIds.isEmpty()) {
-                String insertJunctionSql =
-                    "INSERT INTO outage_affected_consumers (outage_id, consumer_id) " +
-                    "VALUES (?, ?) ON CONFLICT (outage_id, consumer_id) DO NOTHING";
+                // Multi-value batch insert in ONE single round trip
+                StringBuilder insertJunctionSql = new StringBuilder(
+                    "INSERT INTO outage_affected_consumers (outage_id, consumer_id) VALUES "
+                );
+                for (int i = 0; i < affectedConsumerIds.size(); i++) {
+                    if (i > 0) insertJunctionSql.append(", ");
+                    insertJunctionSql.append("(?, ?)");
+                }
+                insertJunctionSql.append(" ON CONFLICT (outage_id, consumer_id) DO NOTHING");
 
-                try (PreparedStatement junctionStmt = conn.prepareStatement(insertJunctionSql)) {
+                try (PreparedStatement junctionStmt = conn.prepareStatement(insertJunctionSql.toString())) {
+                    int idx = 1;
+                    int outId = outage.getOutageId();
                     for (Integer cId : affectedConsumerIds) {
-                        junctionStmt.setInt(1, outage.getOutageId());
-                        junctionStmt.setInt(2, cId);
-                        junctionStmt.addBatch();
+                        junctionStmt.setInt(idx++, outId);
+                        junctionStmt.setInt(idx++, cId);
                     }
-                    junctionStmt.executeBatch();
+                    junctionStmt.executeUpdate();
                 }
 
-                if (DatabaseConnection.columnExists(conn, "consumers", "power_status")) {
-                    boolean isBool = DatabaseConnection.isColumnTypeBoolean(conn, "consumers", "power_status");
-                    String updateConsumersSql = isBool
-                        ? "UPDATE consumers SET power_status = FALSE WHERE consumer_id = ?"
-                        : "UPDATE consumers SET power_status = 'OUTAGE' WHERE consumer_id = ?";
-                    try (PreparedStatement consumerStmt = conn.prepareStatement(updateConsumersSql)) {
-                        for (Integer cId : affectedConsumerIds) {
-                            consumerStmt.setInt(1, cId);
-                            consumerStmt.addBatch();
-                        }
-                        consumerStmt.executeBatch();
+                // Batch update consumer power status in ONE single round trip
+                StringBuilder updateConsumersSql = new StringBuilder(
+                    "UPDATE consumers SET power_status = 'OUTAGE' WHERE consumer_id IN ("
+                );
+                for (int i = 0; i < affectedConsumerIds.size(); i++) {
+                    if (i > 0) updateConsumersSql.append(", ");
+                    updateConsumersSql.append("?");
+                }
+                updateConsumersSql.append(")");
+
+                try (PreparedStatement consumerStmt = conn.prepareStatement(updateConsumersSql.toString())) {
+                    for (int i = 0; i < affectedConsumerIds.size(); i++) {
+                        consumerStmt.setInt(i + 1, affectedConsumerIds.get(i));
                     }
+                    consumerStmt.executeUpdate();
                 }
             }
 

@@ -282,14 +282,29 @@
             <!-- Technician Selector & Filter Bar -->
             <div class="tech-filter-bar">
                 <div class="tech-filter-group">
-                    <label for="tech-crew-selector" class="tech-filter-label">Active Technician Profile / Filter:</label>
-                    <select id="tech-crew-selector" class="tech-select-input">
+                    <label for="tech-filter-search" class="tech-filter-label">Filter Workforce:</label>
+                    <input type="text" id="tech-filter-search" class="tech-search-input" placeholder="Search by name, ID, or skill (e.g. Suresh, 201, Transformer)..." aria-label="Search technicians by name, ID, or skill">
+                    <select id="tech-filter-status" class="tech-select-input" style="min-width: 170px;" aria-label="Filter technicians by availability status">
+                        <option value="ALL">All Availability Statuses</option>
+                        <option value="AVAILABLE">Available / Standby</option>
+                        <option value="BUSY">Active on Site / Busy</option>
+                    </select>
+                </div>
+                <div class="tech-filter-group">
+                    <label for="tech-crew-selector" class="tech-filter-label">Active Technician:</label>
+                    <select id="tech-crew-selector" class="tech-select-input" aria-label="Select active technician">
                         <option value="ALL">All Field Crews (Global Restoration View)</option>
                     </select>
                 </div>
                 <div class="tech-filter-actions">
-                    <button type="button" id="btn-tech-refresh" class="btn btn-accent">Refresh Tasks</button>
+                    <button type="button" id="btn-tech-reset-filter" class="btn btn-secondary" title="Reset technician filter">Reset Filters</button>
+                    <button type="button" id="btn-tech-refresh" class="btn btn-accent" title="Refresh live tasks">Refresh Tasks</button>
                 </div>
+            </div>
+
+            <!-- Active Technician Profile Card -->
+            <div id="tech-profile-container" class="tech-profile-container" aria-label="Active Technician Profile">
+                <!-- Dynamically populated by renderTechnicianProfile() -->
             </div>
 
             <!-- Technician Navigation Sub-Tabs -->

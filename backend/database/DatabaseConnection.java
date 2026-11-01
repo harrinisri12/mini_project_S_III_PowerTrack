@@ -49,6 +49,20 @@ public class DatabaseConnection {
     private static final ConcurrentHashMap<String, Boolean> isBooleanColumnCache = new ConcurrentHashMap<>();
 
     static {
+        // Pre-seed known schema column cache to eliminate runtime metadata round-trips
+        columnExistsCache.put("outages.priority_reason", true);
+        columnExistsCache.put("outages.critical_facilities", true);
+        columnExistsCache.put("outages.queue_sequence", true);
+        columnExistsCache.put("consumers.power_status", true);
+        columnExistsCache.put("network_nodes.is_active", true);
+        columnExistsCache.put("technicians.availability_status", true);
+
+        isBooleanColumnCache.put("consumers.power_status", false); // CHECK constraint text ('POWER ON', 'OUTAGE')
+        isBooleanColumnCache.put("network_nodes.is_active", true);
+        isBooleanColumnCache.put("technicians.availability_status", true);
+    }
+
+    static {
         System.setProperty("java.net.preferIPv4Stack", "true");
         try {
             Class.forName(DRIVER_CLASS);
