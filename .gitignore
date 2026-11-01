@@ -1,13 +1,29 @@
+
 # Environment and secret credentials
 .env
+.env.*
+!.env.example
 *.env
 *.env.local
+*.env.*.local
 
-# Java class files
+# Java compiled class files
 *.class
-backend/**/*.class
+**/*.class
 
-# IDE and temporary files
+# Java build output
+target/
+build/
+out/
+
+# IDE settings
 .vscode/
 .idea/
+
+# Logs and temporary files
 *.log
+*.tmp
+
+# Operating system files
+.DS_Store
+Thumbs.db
