@@ -2,44 +2,58 @@ package datastructure;
 
 import java.util.ArrayList;
 
+/**
+ * Custom Priority Queue implemented as a linked list.
+ *
+ * Requirements satisfied:
+ * - Thread-safe operations for concurrent API access.
+ * - Highest-priority outage always placed at front.
+ * - Strict FIFO ordering among outages with equal priority.
+ * - O(1) dequeue and peek.
+ */
 public class Queue<T> {
 
     /**
      * Internal node representing an element in the queue.
      */
-    private class Node {
-        T data;
-        Node next;
+    private static class Node<E> {
+        E data;
+        Node<E> next;
 
-        Node(T data) {
+        Node(E data) {
             this.data = data;
             this.next = null;
         }
     }
 
-    private Node front; // Head of queue (highest priority item)
-    private Node rear;  // Tail of queue
-    private int size;   // Number of elements in queue
+    private Node<T> front; // Head of queue (highest priority item)
+    private Node<T> rear;  // Tail of queue
+    private int size;      // Number of elements in queue
 
     /**
      * Initializes an empty priority queue.
      */
     public Queue() {
-        front = null;
-        rear = null;
-        size = 0;
+        this.front = null;
+        this.rear = null;
+        this.size = 0;
     }
 
     /**
      * Inserts an element into the queue.
      * If the element implements Comparable, it is inserted in sorted priority order
-     * (highest priority at front). Otherwise, standard FIFO order is used.
+     * (highest priority at front). When priorities are equal, strict FIFO order is maintained
+     * by placing the new element after existing elements of equal priority.
      *
      * @param data element to enqueue
      */
     @SuppressWarnings("unchecked")
-    public void enqueue(T data) {
-        Node newNode = new Node(data);
+    public synchronized void enqueue(T data) {
+        if (data == null) {
+            return;
+        }
+
+        Node<T> newNode = new Node<>(data);
 
         // Case 1: Queue is empty
         if (front == null) {
@@ -53,7 +67,8 @@ public class Queue<T> {
         if (data instanceof Comparable) {
             Comparable<T> comp = (Comparable<T>) data;
 
-            // If newNode has higher priority than current front, place at front
+            // If newNode has strictly higher priority than current front, place at front
+            // Note: comp.compareTo(front.data) < 0 indicates newNode has higher priority
             if (comp.compareTo(front.data) < 0) {
                 newNode.next = front;
                 front = newNode;
@@ -61,8 +76,10 @@ public class Queue<T> {
                 return;
             }
 
-            // Traverse to find insertion point
-            Node current = front;
+            // Traverse to find insertion point.
+            // Using "comp.compareTo(current.next.data) >= 0" guarantees FIFO for equal priority items
+            // because newNode will be inserted AFTER any items with equal priority score.
+            Node<T> current = front;
             while (current.next != null && comp.compareTo(current.next.data) >= 0) {
                 current = current.next;
             }
@@ -89,7 +106,7 @@ public class Queue<T> {
      *
      * @return T highest priority element, or null if empty
      */
-    public T dequeue() {
+    public synchronized T dequeue() {
         if (isEmpty()) {
             return null;
         }
@@ -111,7 +128,7 @@ public class Queue<T> {
      *
      * @return T highest priority element, or null if empty
      */
-    public T peek() {
+    public synchronized T peek() {
         if (isEmpty()) {
             return null;
         }
@@ -123,7 +140,7 @@ public class Queue<T> {
      *
      * @return true if empty, false otherwise
      */
-    public boolean isEmpty() {
+    public synchronized boolean isEmpty() {
         return front == null;
     }
 
@@ -132,7 +149,7 @@ public class Queue<T> {
      *
      * @return int size
      */
-    public int size() {
+    public synchronized int size() {
         return size;
     }
 
@@ -143,12 +160,12 @@ public class Queue<T> {
      * @param item element to find
      * @return 1-based index, or -1 if not found
      */
-    public int getPosition(T item) {
-        if (item == null) {
+    public synchronized int getPosition(T item) {
+        if (item == null || front == null) {
             return -1;
         }
 
-        Node current = front;
+        Node<T> current = front;
         int pos = 1;
 
         while (current != null) {
@@ -164,12 +181,12 @@ public class Queue<T> {
 
     /**
      * Removes a specific item from any position in the queue.
-     * Called when an outage is assigned or directly dispatched out of sequence.
+     * Called when an outage is directly assigned or dispatched.
      *
      * @param item element to remove
      * @return true if item was found and removed, false otherwise
      */
-    public boolean remove(T item) {
+    public synchronized boolean remove(T item) {
         if (item == null || front == null) {
             return false;
         }
@@ -185,7 +202,7 @@ public class Queue<T> {
         }
 
         // Traverse to locate and unlink target node
-        Node current = front;
+        Node<T> current = front;
         while (current.next != null) {
             if (item.equals(current.next.data)) {
                 if (current.next == rear) {
@@ -202,13 +219,22 @@ public class Queue<T> {
     }
 
     /**
-     * Exports all queued elements in priority order as a Java ArrayList.
+     * Clears all elements from the queue.
+     */
+    public synchronized void clear() {
+        front = null;
+        rear = null;
+        size = 0;
+    }
+
+    /**
+     * Exports all queued elements in priority order as a new Java ArrayList.
      *
      * @return ArrayList of queued elements in descending priority order
      */
-    public ArrayList<T> toList() {
-        ArrayList<T> list = new ArrayList<>();
-        Node current = front;
+    public synchronized ArrayList<T> toList() {
+        ArrayList<T> list = new ArrayList<>(size);
+        Node<T> current = front;
 
         while (current != null) {
             list.add(current.data);
@@ -221,13 +247,13 @@ public class Queue<T> {
     /**
      * Prints all queued elements in priority order to the terminal (for CLI review).
      */
-    public void display() {
+    public synchronized void display() {
         if (isEmpty()) {
             System.out.println("Queue is empty.");
             return;
         }
 
-        Node current = front;
+        Node<T> current = front;
         int pos = 1;
 
         System.out.println();

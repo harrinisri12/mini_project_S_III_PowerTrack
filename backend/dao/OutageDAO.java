@@ -6,7 +6,6 @@ import model.Outage;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
@@ -15,78 +14,122 @@ import java.util.List;
 /**
  * Data Access Object for 'outages', 'outage_affected_consumers',
  * 'technician_assignments', and 'restoration_history' tables.
- * Utilizes atomic transactions where multiple related records must succeed together.
+ *
+ * Requirements satisfied:
+ * - Specific column projection (avoids SELECT *).
+ * - Filtered queries (getActiveOutages, getHistoricalOutages) avoiding unnecessary full table scans.
+ * - Checking for existing active outages on components.
+ * - Atomic ACID database transactions with proper rollback and connection recycling.
+ * - Automatic cache invalidation across dependent DAOs.
  */
 public class OutageDAO {
+
+    private static final String OUTAGE_COLUMNS =
+        "outage_id, fault_component_id, fault_type, affected_area, affected_consumer_count, " +
+        "priority, status, reported_at, restored_at, priority_reason, critical_facilities, " +
+        "assigned_technician_id, assigned_technician_name, queue_sequence";
 
     /**
      * Loads all outages (active, in-progress, and historical restored) from Supabase.
      */
     public List<Outage> getAllOutages() throws SQLException {
-        List<Outage> list = new ArrayList<>();
-        String sql = "SELECT * FROM outages ORDER BY reported_at ASC";
-
+        String sql = "SELECT " + OUTAGE_COLUMNS + " FROM outages ORDER BY reported_at ASC";
         try (Connection conn = DatabaseConnection.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql);
              ResultSet rs = stmt.executeQuery()) {
+            return mapOutages(rs, conn);
+        }
+    }
 
-            ResultSetMetaData meta = rs.getMetaData();
-            boolean hasPriorityReason = DatabaseConnection.hasColumn(meta, "priority_reason");
-            boolean hasCriticalFacilities = DatabaseConnection.hasColumn(meta, "critical_facilities");
-            boolean hasAssignedName = DatabaseConnection.hasColumn(meta, "assigned_technician_name");
-            boolean hasAssignedId = DatabaseConnection.hasColumn(meta, "assigned_technician_id");
-            boolean hasQueueSeq = DatabaseConnection.hasColumn(meta, "queue_sequence");
-            boolean hasReportedAt = DatabaseConnection.hasColumn(meta, "reported_at");
-            boolean hasRestoredAt = DatabaseConnection.hasColumn(meta, "restored_at");
+    /**
+     * Loads only active/in-progress outages for dashboard performance.
+     */
+    public List<Outage> getActiveOutages() throws SQLException {
+        String sql = "SELECT " + OUTAGE_COLUMNS + " FROM outages WHERE status != 'RESTORED' ORDER BY queue_sequence ASC, reported_at ASC";
+        try (Connection conn = DatabaseConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql);
+             ResultSet rs = stmt.executeQuery()) {
+            return mapOutages(rs, conn);
+        }
+    }
 
-            int fallbackSeq = 1;
+    /**
+     * Loads only completed/restored outages for audit history.
+     */
+    public List<Outage> getHistoricalOutages() throws SQLException {
+        String sql = "SELECT " + OUTAGE_COLUMNS + " FROM outages WHERE status = 'RESTORED' ORDER BY restored_at DESC";
+        try (Connection conn = DatabaseConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql);
+             ResultSet rs = stmt.executeQuery()) {
+            return mapOutages(rs, conn);
+        }
+    }
 
-            while (rs.next()) {
-                int id = rs.getInt("outage_id");
-                String comp = rs.getString("fault_component_id");
-                String faultType = rs.getString("fault_type");
-                String rawAreas = rs.getString("affected_area");
-                int consumers = rs.getInt("affected_consumer_count");
-                String priority = rs.getString("priority");
-                String status = rs.getString("status");
-
-                String reason = hasPriorityReason ? rs.getString("priority_reason") : null;
-                String rawCrit = hasCriticalFacilities ? rs.getString("critical_facilities") : null;
-                int techId = hasAssignedId ? rs.getInt("assigned_technician_id") : 0;
-                String techName = hasAssignedName ? rs.getString("assigned_technician_name") : null;
-                int seq = hasQueueSeq ? rs.getInt("queue_sequence") : fallbackSeq++;
-                Timestamp repAt = hasReportedAt ? rs.getTimestamp("reported_at") : null;
-                Timestamp resAt = hasRestoredAt ? rs.getTimestamp("restored_at") : null;
-
-                ArrayList<String> areasList = parseCommaList(rawAreas);
-                ArrayList<String> critList = parseCommaList(rawCrit);
-
-                Outage o = new Outage(id, comp, faultType, areasList, consumers);
-                o.setPriority(priority);
-                o.setStatus(status);
-                o.setCriticalFacilities(critList);
-                o.setPriorityReason(reason != null ? reason : "");
-                o.setQueueSequence(seq);
-                o.setReportedAt(repAt);
-                o.setRestoredAt(resAt);
-
-                // If technician name was not directly on the outage, resolve via technician_assignments join
-                if (techName != null && !techName.trim().isEmpty()) {
-                    o.setAssignedTechnician(techName);
-                    o.setAssignedTechnicianId(techId > 0 ? techId : null);
-                } else {
-                    resolveTechnicianFromAssignments(conn, o);
-                }
-
-                list.add(o);
+    /**
+     * Checks if there is already an active or in-progress outage for the given component.
+     */
+    public boolean hasActiveOutageForComponent(String componentId) throws SQLException {
+        if (componentId == null || componentId.trim().isEmpty()) {
+            return false;
+        }
+        String sql = "SELECT 1 FROM outages WHERE fault_component_id = ? AND status != 'RESTORED' LIMIT 1";
+        try (Connection conn = DatabaseConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, componentId.trim().toUpperCase());
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
             }
+        }
+    }
+
+    private List<Outage> mapOutages(ResultSet rs, Connection conn) throws SQLException {
+        List<Outage> list = new ArrayList<>();
+        int fallbackSeq = 1;
+
+        while (rs.next()) {
+            int id = rs.getInt("outage_id");
+            String comp = rs.getString("fault_component_id");
+            String faultType = rs.getString("fault_type");
+            String rawAreas = rs.getString("affected_area");
+            int consumers = rs.getInt("affected_consumer_count");
+            String priority = rs.getString("priority");
+            String status = rs.getString("status");
+
+            String reason = rs.getString("priority_reason");
+            String rawCrit = rs.getString("critical_facilities");
+            int techId = rs.getInt("assigned_technician_id");
+            String techName = rs.getString("assigned_technician_name");
+            int seq = rs.getInt("queue_sequence");
+            if (rs.wasNull() || seq == 0) {
+                seq = fallbackSeq++;
+            }
+            Timestamp repAt = rs.getTimestamp("reported_at");
+            Timestamp resAt = rs.getTimestamp("restored_at");
+
+            ArrayList<String> areasList = parseCommaList(rawAreas);
+            ArrayList<String> critList = parseCommaList(rawCrit);
+
+            Outage o = new Outage(id, comp, faultType, areasList, consumers);
+            o.setPriority(priority);
+            o.setStatus(status);
+            o.setCriticalFacilities(critList);
+            o.setPriorityReason(reason != null ? reason : "");
+            o.setQueueSequence(seq);
+            o.setReportedAt(repAt);
+            o.setRestoredAt(resAt);
+
+            if (techName != null && !techName.trim().isEmpty()) {
+                o.setAssignedTechnician(techName);
+                o.setAssignedTechnicianId(techId > 0 ? techId : null);
+            } else {
+                resolveTechnicianFromAssignments(conn, o);
+            }
+
+            list.add(o);
         }
         return list;
     }
 
-    /**
-     * Resolves the assigned technician from technician_assignments and technicians tables.
-     */
     private void resolveTechnicianFromAssignments(Connection conn, Outage o) {
         String sql = "SELECT t.technician_id, t.technician_name " +
                      "FROM technician_assignments ta " +
@@ -112,9 +155,6 @@ public class OutageDAO {
         o.setAssignedTechnicianId(null);
     }
 
-    /**
-     * Retrieves the next available Outage ID from the database sequence/max value.
-     */
     public int getNextOutageId() throws SQLException {
         String sql = "SELECT COALESCE(MAX(outage_id), 1000) + 1 FROM outages";
         try (Connection conn = DatabaseConnection.getConnection();
@@ -134,7 +174,7 @@ public class OutageDAO {
      * 3. Sets power_status = FALSE on affected consumer records
      * 4. Sets is_active = FALSE on failed network node
      */
-    public void insertOutageTransaction(Outage outage, List<Integer> affectedConsumerIds) throws SQLException {
+    public synchronized void insertOutageTransaction(Outage outage, List<Integer> affectedConsumerIds) throws SQLException {
         if (outage == null) return;
 
         Connection conn = null;
@@ -146,7 +186,6 @@ public class OutageDAO {
             boolean hasCrit = DatabaseConnection.columnExists(conn, "outages", "critical_facilities");
             boolean hasSeq = DatabaseConnection.columnExists(conn, "outages", "queue_sequence");
 
-            // 1. Build insert statement dynamically for outages
             StringBuilder sql = new StringBuilder("INSERT INTO outages (outage_id, fault_component_id, fault_type, affected_area, affected_consumer_count, priority, status, reported_at");
             if (hasReason) sql.append(", priority_reason");
             if (hasCrit) sql.append(", critical_facilities");
@@ -212,6 +251,10 @@ public class OutageDAO {
             }
 
             conn.commit();
+
+            // Invalidate caches to guarantee consistent state across system
+            NetworkDAO.invalidateCache();
+            ConsumerDAO.invalidateCache();
         } catch (SQLException e) {
             if (conn != null) {
                 try {
@@ -237,7 +280,7 @@ public class OutageDAO {
      * 2. Inserts technician dispatch record into 'technician_assignments'
      * 3. Sets availability_status = FALSE on technician roster
      */
-    public void assignTechnicianTransaction(int outageId, int technicianId, String technicianName) throws SQLException {
+    public synchronized void assignTechnicianTransaction(int outageId, int technicianId, String technicianName) throws SQLException {
         Connection conn = null;
         try {
             conn = DatabaseConnection.getConnection();
@@ -281,6 +324,8 @@ public class OutageDAO {
             }
 
             conn.commit();
+
+            TechnicianDAO.invalidateCache();
         } catch (SQLException e) {
             if (conn != null) {
                 try {
@@ -309,7 +354,7 @@ public class OutageDAO {
      * 5. Updates technician assignment status to 'COMPLETED' in 'technician_assignments'
      * 6. Creates persistent audit entry in 'restoration_history'
      */
-    public void restoreOutageTransaction(
+    public synchronized void restoreOutageTransaction(
         int outageId,
         String failedComponent,
         List<String> affectedAreas,
@@ -394,6 +439,11 @@ public class OutageDAO {
             }
 
             conn.commit();
+
+            // Invalidate caches so other queries see updated statuses immediately
+            NetworkDAO.invalidateCache();
+            ConsumerDAO.invalidateCache();
+            TechnicianDAO.invalidateCache();
         } catch (SQLException e) {
             if (conn != null) {
                 try {
@@ -412,8 +462,6 @@ public class OutageDAO {
             }
         }
     }
-
-
 
     private static ArrayList<String> parseCommaList(String raw) {
         ArrayList<String> list = new ArrayList<>();

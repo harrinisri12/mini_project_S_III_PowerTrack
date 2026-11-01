@@ -168,7 +168,13 @@
 
     async function updateSystemMetrics() {
         try {
-            const stats = await apiRequest("/api/stats", { method: "GET" });
+            // Fetch combined summary in 1 fast, targeted call avoiding multiple round-trips
+            const summary = await apiRequest("/api/dashboard/summary").catch(async () => {
+                const s = await apiRequest("/api/stats");
+                return { stats: s };
+            });
+
+            const stats = summary.stats || summary;
 
             // 1. Government Metrics
             const govNodes = document.getElementById("gov-metric-nodes");
@@ -181,16 +187,11 @@
             if (govOutages) govOutages.textContent = stats.activeOutages ?? "0";
             if (govTechs) govTechs.textContent = `${stats.availableTechnicians ?? 0}`;
 
-            // 2. Technician Metrics
-            const activeOutages = await apiRequest("/api/outages/active").catch(() => []);
-            const historyOutages = await apiRequest("/api/outages/history").catch(() => []);
-
-            const activeList = Array.isArray(activeOutages) ? activeOutages : [];
-            const historyList = Array.isArray(historyOutages) ? historyOutages : [];
-
-            const assignedCount = activeList.filter(o => o.status === "ASSIGNED" || (o.technician && o.technician !== "NOT ASSIGNED" && o.status === "ACTIVE")).length;
-            const inProgressCount = activeList.filter(o => o.status === "IN PROGRESS").length;
-            const restoredCount = historyList.filter(o => o.status === "RESTORED").length;
+            // 2. Technician Metrics (directly from pre-aggregated stats)
+            const assignedCount = stats.assignedOutages ?? 0;
+            const inProgressCount = stats.inProgressOutages ?? 0;
+            const restoredCount = stats.restoredOutages ?? 0;
+            const activeCount = stats.activeOutages ?? 0;
 
             const techAssigned = document.getElementById("tech-metric-assigned");
             const techInProgress = document.getElementById("tech-metric-inprogress");
@@ -205,7 +206,7 @@
             // Update badge counters on technician tabs
             const activeBadge = document.getElementById("tech-badge-active-count");
             const completedBadge = document.getElementById("tech-badge-completed-count");
-            if (activeBadge) activeBadge.textContent = String(activeList.length);
+            if (activeBadge) activeBadge.textContent = String(activeCount);
             if (completedBadge) completedBadge.textContent = String(restoredCount);
 
         } catch (e) {

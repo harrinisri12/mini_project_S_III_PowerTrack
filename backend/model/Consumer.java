@@ -1,5 +1,17 @@
 package model;
 
+import java.util.Objects;
+
+/**
+ * Consumer model representing electricity accounts connected to the grid.
+ *
+ * Categorization & Priority Tiers:
+ * 1. Hospitals and emergency medical facilities (Tier 5 - Highest Priority)
+ * 2. Emergency services and critical infrastructure (Tier 4)
+ * 3. Essential public services & educational institutions (Tier 3)
+ * 4. Residential consumers (Tier 2)
+ * 5. Commercial & industrial consumers (Tier 1)
+ */
 public class Consumer {
 
     private int consumerId;
@@ -34,55 +46,87 @@ public class Consumer {
         boolean powerAvailable
     ) {
         this.consumerId = consumerId;
-        this.name = name;
-        this.area = area;
-        this.connectedLoadKw = connectedLoadKw;
+        this.name = name != null ? name.trim() : "Unknown Consumer";
+        this.area = area != null ? area.trim() : "";
+        this.connectedLoadKw = connectedLoadKw > 0 ? connectedLoadKw : 5.0;
 
-        // Determine consumer category
+        // 1. Determine consumer category
         if (consumerType != null && !consumerType.trim().isEmpty() && !consumerType.equalsIgnoreCase("DEFAULT")) {
             this.consumerType = consumerType.trim().toUpperCase();
         } else {
-            this.consumerType = inferConsumerType(name);
+            this.consumerType = inferConsumerType(this.name);
         }
 
-        // Determine criticality level:
-        // Hospitals, clinics, health centers, emergency services -> HIGH
-        // Commercial establishments, industries, schools -> MEDIUM
-        // Ordinary residential households -> LOW
+        // 2. Determine criticality level (HIGH, MEDIUM, LOW)
         if (criticalityLevel != null && !criticalityLevel.trim().isEmpty()
-                && !criticalityLevel.equalsIgnoreCase("DEFAULT")
-                && !criticalityLevel.equalsIgnoreCase("LOW")) {
-            String cleanLevel = criticalityLevel.trim().toUpperCase();
-            this.criticalityLevel = cleanLevel.equals("CRITICAL") ? "HIGH" : cleanLevel;
-        } else if (criticalityLevel != null && criticalityLevel.equalsIgnoreCase("LOW") && isPureResidential(name, this.consumerType)) {
-            this.criticalityLevel = "LOW";
+                && !criticalityLevel.equalsIgnoreCase("DEFAULT")) {
+            String clean = criticalityLevel.trim().toUpperCase();
+            this.criticalityLevel = clean.equals("CRITICAL") ? "HIGH" : clean;
         } else {
-            this.criticalityLevel = inferCriticalityLevel(name, this.consumerType);
+            this.criticalityLevel = inferCriticalityLevel(this.name, this.consumerType);
         }
 
         this.powerAvailable = powerAvailable;
     }
 
-    public static boolean isPureResidential(String name, String type) {
-        if (type != null && !type.equalsIgnoreCase("RESIDENTIAL")) {
-            return false;
+    /**
+     * Determines the detailed restoration priority tier (1 to 5):
+     * Tier 5: Hospitals and emergency medical facilities
+     * Tier 4: Emergency services and critical infrastructure (fire, water treatment)
+     * Tier 3: Essential public services and education
+     * Tier 2: Residential consumers
+     * Tier 1: Commercial & industrial consumers
+     */
+    public int getCriticalityTier() {
+        return evaluateCriticalityTier(this.name, this.consumerType);
+    }
+
+    public static int evaluateCriticalityTier(String name, String type) {
+        String n = (name != null) ? name.toLowerCase() : "";
+        String t = (type != null) ? type.toUpperCase() : "";
+
+        // Tier 5: Hospitals and emergency medical facilities
+        if (t.contains("HOSPITAL") || t.contains("CLINIC") || t.contains("TRAUMA")
+                || n.contains("hospital") || n.contains("clinic") || n.contains("trauma")
+                || n.contains("icu") || n.contains("oxygen plant") || n.contains("maternity")) {
+            return 5;
         }
-        if (name == null) return true;
-        String lower = name.toLowerCase();
-        return !lower.contains("hospital") && !lower.contains("clinic") && !lower.contains("health")
-            && !lower.contains("emergency") && !lower.contains("fire") && !lower.contains("water")
-            && !lower.contains("effluent") && !lower.contains("commercial") && !lower.contains("complex")
-            && !lower.contains("mill") && !lower.contains("textile") && !lower.contains("school")
-            && !lower.contains("college") && !lower.contains("storage") && !lower.contains("logistics")
-            && !lower.contains("works") && !lower.contains("garments") && !lower.contains("co-op")
-            && !lower.contains("society") && !lower.contains("plant");
+
+        // Tier 4: Emergency services and critical infrastructure
+        if (t.contains("EMERGENCY") || t.contains("FIRE") || t.contains("WATER")
+                || n.contains("emergency") || n.contains("fire") || n.contains("ambulance")
+                || n.contains("water supply") || n.contains("effluent") || n.contains("treatment plant")) {
+            return 4;
+        }
+
+        // Tier 3: Essential public services & education
+        if (t.contains("EDUCATION") || t.contains("COMMUNITY") || t.contains("PUBLIC")
+                || n.contains("school") || n.contains("college") || n.contains("university")
+                || n.contains("health center") || n.contains("health centre") || n.contains("co-op")) {
+            return 3;
+        }
+
+        // Tier 2: Residential consumers
+        if (t.contains("RESIDENTIAL") || n.contains("domestic") || n.contains("quarters") || n.contains("household")) {
+            return 2;
+        }
+
+        // Tier 1: Commercial & industrial consumers
+        if (t.contains("COMMERCIAL") || t.contains("INDUSTRIAL")
+                || n.contains("commercial") || n.contains("textile") || n.contains("mill")
+                || n.contains("industry") || n.contains("plant") || n.contains("garments")
+                || n.contains("bazaar") || n.contains("complex") || n.contains("logistics")) {
+            return 1;
+        }
+
+        return 2; // Default to residential tier
     }
 
     public static String inferConsumerType(String name) {
         if (name == null) return "RESIDENTIAL";
         String lower = name.toLowerCase();
         if (lower.contains("hospital")) return "HOSPITAL";
-        if (lower.contains("clinic")) return "CLINIC";
+        if (lower.contains("clinic") || lower.contains("maternity") || lower.contains("trauma")) return "CLINIC";
         if (lower.contains("health center") || lower.contains("health centre")) return "COMMUNITY_HEALTH";
         if (lower.contains("fire") || lower.contains("emergency") || lower.contains("ambulance")) return "EMERGENCY_SERVICE";
         if (lower.contains("water") || lower.contains("effluent")) return "WATER_FACILITY";
@@ -93,28 +137,16 @@ public class Consumer {
     }
 
     public static String inferCriticalityLevel(String name, String type) {
-        String t = (type != null) ? type.toUpperCase() : "";
-        String n = (name != null) ? name.toLowerCase() : "";
-
-        // 1. HIGH: Hospitals, clinics, community health centers, emergency services, water facilities & essential utilities
-        if (t.contains("HOSPITAL") || t.contains("CLINIC") || t.contains("HEALTH") || t.contains("EMERGENCY") || t.contains("WATER")
-            || n.contains("hospital") || n.contains("clinic") || n.contains("health center") || n.contains("health centre") 
-            || n.contains("emergency") || n.contains("fire") || n.contains("oxygen") || n.contains("trauma") || n.contains("icu") 
-            || n.contains("water supply") || n.contains("effluent")) {
+        int tier = evaluateCriticalityTier(name, type);
+        if (tier >= 4) {
             return "HIGH";
-        }
-
-        // 2. MEDIUM: Commercial establishments, industries, schools and other public facilities
-        if (t.contains("COMMERCIAL") || t.contains("INDUSTRIAL") || t.contains("EDUCATION") || t.contains("PUBLIC")
-            || n.contains("commercial") || n.contains("complex") || n.contains("mill") || n.contains("spinning")
-            || n.contains("textile") || n.contains("school") || n.contains("bazaar") || n.contains("storage") 
-            || n.contains("logistics") || n.contains("works") || n.contains("dyeing") || n.contains("garments") 
-            || n.contains("co-op") || n.contains("society") || n.contains("plant")) {
+        } else if (tier == 3) {
             return "MEDIUM";
+        } else if (tier == 2) {
+            return "LOW";
+        } else {
+            return "LOW";
         }
-
-        // 3. LOW: Ordinary residential households and non-critical loads
-        return "LOW";
     }
 
     public int getConsumerId() {
@@ -165,6 +197,19 @@ public class Consumer {
 
     public void setPowerAvailable(boolean powerAvailable) {
         this.powerAvailable = powerAvailable;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        Consumer consumer = (Consumer) o;
+        return consumerId == consumer.consumerId;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(consumerId);
     }
 
     public void display() {
