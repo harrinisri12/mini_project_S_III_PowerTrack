@@ -24,20 +24,32 @@ import java.util.List;
  */
 public class OutageDAO {
 
-    private static final String OUTAGE_COLUMNS =
-        "outage_id, fault_component_id, fault_type, affected_area, affected_consumer_count, " +
-        "priority, status, reported_at, restored_at, priority_reason, critical_facilities, " +
-        "assigned_technician_id, assigned_technician_name, queue_sequence";
+    /**
+     * Base query with LEFT JOIN to resolve technician assignments in a single query,
+     * completely eliminating N+1 individual lookups per outage.
+     */
+    private static final String OUTAGE_BASE_QUERY =
+        "SELECT o.outage_id, o.fault_component_id, o.fault_type, o.affected_area, " +
+        "o.affected_consumer_count, o.priority, o.status, o.reported_at, o.restored_at, " +
+        "o.priority_reason, o.critical_facilities, o.queue_sequence, " +
+        "COALESCE(o.assigned_technician_id, ta_latest.technician_id) AS resolved_tech_id, " +
+        "COALESCE(o.assigned_technician_name, t.technician_name) AS resolved_tech_name " +
+        "FROM outages o " +
+        "LEFT JOIN (" +
+        "  SELECT DISTINCT ON (outage_id) outage_id, technician_id " +
+        "  FROM technician_assignments ORDER BY outage_id, assigned_at DESC" +
+        ") ta_latest ON ta_latest.outage_id = o.outage_id " +
+        "LEFT JOIN technicians t ON t.technician_id = ta_latest.technician_id";
 
     /**
      * Loads all outages (active, in-progress, and historical restored) from Supabase.
      */
     public List<Outage> getAllOutages() throws SQLException {
-        String sql = "SELECT " + OUTAGE_COLUMNS + " FROM outages ORDER BY reported_at ASC";
+        String sql = OUTAGE_BASE_QUERY + " ORDER BY o.reported_at ASC";
         try (Connection conn = DatabaseConnection.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql);
              ResultSet rs = stmt.executeQuery()) {
-            return mapOutages(rs, conn);
+            return mapOutages(rs);
         }
     }
 
@@ -45,11 +57,11 @@ public class OutageDAO {
      * Loads only active/in-progress outages for dashboard performance.
      */
     public List<Outage> getActiveOutages() throws SQLException {
-        String sql = "SELECT " + OUTAGE_COLUMNS + " FROM outages WHERE status != 'RESTORED' ORDER BY queue_sequence ASC, reported_at ASC";
+        String sql = OUTAGE_BASE_QUERY + " WHERE o.status != 'RESTORED' ORDER BY o.queue_sequence ASC, o.reported_at ASC";
         try (Connection conn = DatabaseConnection.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql);
              ResultSet rs = stmt.executeQuery()) {
-            return mapOutages(rs, conn);
+            return mapOutages(rs);
         }
     }
 
@@ -57,11 +69,11 @@ public class OutageDAO {
      * Loads only completed/restored outages for audit history.
      */
     public List<Outage> getHistoricalOutages() throws SQLException {
-        String sql = "SELECT " + OUTAGE_COLUMNS + " FROM outages WHERE status = 'RESTORED' ORDER BY restored_at DESC";
+        String sql = OUTAGE_BASE_QUERY + " WHERE o.status = 'RESTORED' ORDER BY o.restored_at DESC";
         try (Connection conn = DatabaseConnection.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql);
              ResultSet rs = stmt.executeQuery()) {
-            return mapOutages(rs, conn);
+            return mapOutages(rs);
         }
     }
 
@@ -82,7 +94,7 @@ public class OutageDAO {
         }
     }
 
-    private List<Outage> mapOutages(ResultSet rs, Connection conn) throws SQLException {
+    private List<Outage> mapOutages(ResultSet rs) throws SQLException {
         List<Outage> list = new ArrayList<>();
         int fallbackSeq = 1;
 
@@ -97,14 +109,15 @@ public class OutageDAO {
 
             String reason = rs.getString("priority_reason");
             String rawCrit = rs.getString("critical_facilities");
-            int techId = rs.getInt("assigned_technician_id");
-            String techName = rs.getString("assigned_technician_name");
             int seq = rs.getInt("queue_sequence");
             if (rs.wasNull() || seq == 0) {
                 seq = fallbackSeq++;
             }
             Timestamp repAt = rs.getTimestamp("reported_at");
             Timestamp resAt = rs.getTimestamp("restored_at");
+
+            int techId = rs.getInt("resolved_tech_id");
+            String techName = rs.getString("resolved_tech_name");
 
             ArrayList<String> areasList = parseCommaList(rawAreas);
             ArrayList<String> critList = parseCommaList(rawCrit);
@@ -122,37 +135,13 @@ public class OutageDAO {
                 o.setAssignedTechnician(techName);
                 o.setAssignedTechnicianId(techId > 0 ? techId : null);
             } else {
-                resolveTechnicianFromAssignments(conn, o);
+                o.setAssignedTechnician("NOT ASSIGNED");
+                o.setAssignedTechnicianId(null);
             }
 
             list.add(o);
         }
         return list;
-    }
-
-    private void resolveTechnicianFromAssignments(Connection conn, Outage o) {
-        String sql = "SELECT t.technician_id, t.technician_name " +
-                     "FROM technician_assignments ta " +
-                     "JOIN technicians t ON ta.technician_id = t.technician_id " +
-                     "WHERE ta.outage_id = ? " +
-                     "ORDER BY ta.assigned_at DESC LIMIT 1";
-
-        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setInt(1, o.getOutageId());
-            try (ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
-                    int tId = rs.getInt("technician_id");
-                    String tName = rs.getString("technician_name");
-                    o.setAssignedTechnician(tName != null ? tName : "NOT ASSIGNED");
-                    o.setAssignedTechnicianId(tId > 0 ? tId : null);
-                    return;
-                }
-            }
-        } catch (SQLException ignored) {
-        }
-
-        o.setAssignedTechnician("NOT ASSIGNED");
-        o.setAssignedTechnicianId(null);
     }
 
     public int getNextOutageId() throws SQLException {
@@ -255,6 +244,7 @@ public class OutageDAO {
             // Invalidate caches to guarantee consistent state across system
             NetworkDAO.invalidateCache();
             ConsumerDAO.invalidateCache();
+            StatsDAO.invalidateCache();
         } catch (SQLException e) {
             if (conn != null) {
                 try {
@@ -326,6 +316,7 @@ public class OutageDAO {
             conn.commit();
 
             TechnicianDAO.invalidateCache();
+            StatsDAO.invalidateCache();
         } catch (SQLException e) {
             if (conn != null) {
                 try {
@@ -444,6 +435,7 @@ public class OutageDAO {
             NetworkDAO.invalidateCache();
             ConsumerDAO.invalidateCache();
             TechnicianDAO.invalidateCache();
+            StatsDAO.invalidateCache();
         } catch (SQLException e) {
             if (conn != null) {
                 try {

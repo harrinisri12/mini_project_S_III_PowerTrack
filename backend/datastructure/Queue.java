@@ -40,7 +40,28 @@ public class Queue<T> {
     }
 
     /**
+     * Checks if the queue already contains the specified element based on equals().
+     *
+     * @param data element to search for
+     * @return true if present, false otherwise
+     */
+    public synchronized boolean contains(T data) {
+        if (data == null || front == null) {
+            return false;
+        }
+        Node<T> current = front;
+        while (current != null) {
+            if (data.equals(current.data)) {
+                return true;
+            }
+            current = current.next;
+        }
+        return false;
+    }
+
+    /**
      * Inserts an element into the queue.
+     * Prevents duplicate entries.
      * If the element implements Comparable, it is inserted in sorted priority order
      * (highest priority at front). When priorities are equal, strict FIFO order is maintained
      * by placing the new element after existing elements of equal priority.
@@ -50,6 +71,11 @@ public class Queue<T> {
     @SuppressWarnings("unchecked")
     public synchronized void enqueue(T data) {
         if (data == null) {
+            return;
+        }
+
+        // Prevent duplicate outage entries in the priority queue
+        if (contains(data)) {
             return;
         }
 

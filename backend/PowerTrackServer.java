@@ -146,8 +146,13 @@ public class PowerTrackServer {
         headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         headers.set("Access-Control-Allow-Headers", "Content-Type, Accept");
         headers.set("Content-Type", "application/json; charset=UTF-8");
-        headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
-        headers.set("Pragma", "no-cache");
+    }
+
+    private static void setCacheControl(HttpExchange exchange, String directive) {
+        exchange.getResponseHeaders().set("Cache-Control", directive);
+        if (directive.contains("no-cache") || directive.contains("no-store")) {
+            exchange.getResponseHeaders().set("Pragma", "no-cache");
+        }
     }
 
     private static boolean handleOptions(HttpExchange exchange) throws IOException {
@@ -167,6 +172,7 @@ public class PowerTrackServer {
     private static void handleNetwork(HttpExchange exchange) throws IOException {
         if (handleOptions(exchange)) return;
         addCorsHeaders(exchange);
+        setCacheControl(exchange, "public, max-age=30");
 
         if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
             sendError(exchange, 405, "Method not allowed");
@@ -220,6 +226,7 @@ public class PowerTrackServer {
     private static void handleConsumers(HttpExchange exchange) throws IOException {
         if (handleOptions(exchange)) return;
         addCorsHeaders(exchange);
+        setCacheControl(exchange, "public, max-age=15");
 
         if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
             sendError(exchange, 405, "Method not allowed");
@@ -261,6 +268,7 @@ public class PowerTrackServer {
     private static void handleTechnicians(HttpExchange exchange) throws IOException {
         if (handleOptions(exchange)) return;
         addCorsHeaders(exchange);
+        setCacheControl(exchange, "no-cache, no-store, must-revalidate");
 
         if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
             sendError(exchange, 405, "Method not allowed");
@@ -300,6 +308,7 @@ public class PowerTrackServer {
     private static void handleActiveOutages(HttpExchange exchange) throws IOException {
         if (handleOptions(exchange)) return;
         addCorsHeaders(exchange);
+        setCacheControl(exchange, "no-cache, no-store, must-revalidate");
 
         if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
             sendError(exchange, 405, "Method not allowed");
@@ -312,6 +321,7 @@ public class PowerTrackServer {
     private static void handleHistory(HttpExchange exchange) throws IOException {
         if (handleOptions(exchange)) return;
         addCorsHeaders(exchange);
+        setCacheControl(exchange, "no-cache, no-store, must-revalidate");
 
         if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
             sendError(exchange, 405, "Method not allowed");
@@ -328,6 +338,15 @@ public class PowerTrackServer {
                 ? system.getOutageDAO().getHistoricalOutages()
                 : system.getOutageDAO().getActiveOutages();
 
+            // Pre-compute queue positions in O(Q) instead of O(M*Q) repeated linked-list traversals
+            Map<Integer, Integer> queuePositions = new HashMap<>();
+            if (!includeRestored) {
+                ArrayList<Outage> queued = system.getOutageQueue().toList();
+                for (int i = 0; i < queued.size(); i++) {
+                    queuePositions.put(queued.get(i).getOutageId(), i + 1);
+                }
+            }
+
             StringBuilder json = new StringBuilder("[");
             boolean first = true;
 
@@ -337,7 +356,8 @@ public class PowerTrackServer {
                 if (!first) json.append(",");
                 first = false;
 
-                json.append(outageToJson(outage));
+                int pos = queuePositions.getOrDefault(outage.getOutageId(), -1);
+                json.append(outageToJson(outage, pos));
             }
             json.append("]");
 
@@ -622,6 +642,7 @@ public class PowerTrackServer {
     private static void handleStats(HttpExchange exchange) throws IOException {
         if (handleOptions(exchange)) return;
         addCorsHeaders(exchange);
+        setCacheControl(exchange, "no-cache, max-age=0");
 
         if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
             sendError(exchange, 405, "Method not allowed");
@@ -646,6 +667,7 @@ public class PowerTrackServer {
     private static void handleDashboardSummary(HttpExchange exchange) throws IOException {
         if (handleOptions(exchange)) return;
         addCorsHeaders(exchange);
+        setCacheControl(exchange, "no-cache, max-age=0");
 
         if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
             sendError(exchange, 405, "Method not allowed");
@@ -749,6 +771,11 @@ public class PowerTrackServer {
 
     private static String outageToJson(Outage outage) {
         if (outage == null) return "null";
+        return outageToJson(outage, system.getQueuePosition(outage));
+    }
+
+    private static String outageToJson(Outage outage, int queuePosition) {
+        if (outage == null) return "null";
 
         StringBuilder areas = new StringBuilder("[");
         ArrayList<String> affectedAreas = outage.getAffectedAreas();
@@ -767,8 +794,6 @@ public class PowerTrackServer {
             }
         }
         crit.append("]");
-
-        int queuePosition = system.getQueuePosition(outage);
 
         return "{"
                 + "\"id\":\"OUT-" + outage.getOutageId() + "\","

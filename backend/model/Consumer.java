@@ -77,7 +77,31 @@ public class Consumer {
      * Tier 2: Residential consumers
      * Tier 1: Commercial & industrial consumers
      */
+    /**
+     * Determines the detailed restoration priority tier (1 to 5).
+     * Uses the stored criticalityLevel from PostgreSQL as the authoritative bracket:
+     * - HIGH: Tier 5 (Hospitals/medical) or Tier 4 (Emergency/critical infrastructure)
+     * - MEDIUM: Tier 3 (Essential public services / education)
+     * - LOW: Tier 2 (Residential) or Tier 1 (Commercial / industrial)
+     * Falls back to inference only when the stored criticalityLevel is missing or unrecognized.
+     */
     public int getCriticalityTier() {
+        if (this.criticalityLevel != null && !this.criticalityLevel.trim().isEmpty()) {
+            String level = this.criticalityLevel.trim().toUpperCase();
+            int inferred = evaluateCriticalityTier(this.name, this.consumerType);
+
+            if ("HIGH".equals(level)) {
+                // Guaranteed at least Tier 4; Tier 5 for hospitals/trauma/medical
+                return (inferred >= 5) ? 5 : 4;
+            } else if ("MEDIUM".equals(level)) {
+                // Tier 3: Essential public services / education
+                return 3;
+            } else if ("LOW".equals(level)) {
+                // Tier 2 for residential, Tier 1 for commercial/industrial; capped at 2
+                return (inferred <= 1) ? 1 : 2;
+            }
+        }
+
         return evaluateCriticalityTier(this.name, this.consumerType);
     }
 

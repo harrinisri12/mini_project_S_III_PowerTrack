@@ -72,51 +72,70 @@
     // API CLIENT HELPER
     // =========================================================
 
+    // Map to prevent duplicate overlapping in-flight GET requests
+    const inFlightRequests = new Map();
+
     async function apiRequest(endpoint, options = {}) {
-        const url = BASE_URL + endpoint;
-        const defaultHeaders = {
-            "Accept": "application/json"
-        };
+        const method = (options.method || "GET").toUpperCase();
 
-        if (options.body) {
-            defaultHeaders["Content-Type"] = "application/json";
+        // Deduplicate concurrent overlapping GET requests for the same endpoint
+        if (method === "GET" && inFlightRequests.has(endpoint)) {
+            return inFlightRequests.get(endpoint);
         }
 
-        const config = {
-            ...options,
-            headers: {
-                ...defaultHeaders,
-                ...(options.headers || {})
-            }
-        };
+        const requestPromise = (async () => {
+            const url = BASE_URL + endpoint;
+            const defaultHeaders = {
+                "Accept": "application/json"
+            };
 
-        try {
-            const response = await fetch(url, config);
-            const contentType = response.headers.get("content-type") || "";
-
-            let data;
-            if (contentType.includes("application/json")) {
-                data = await response.json();
-            } else {
-                data = await response.text();
+            if (options.body) {
+                defaultHeaders["Content-Type"] = "application/json";
             }
 
-            if (!response.ok) {
-                const message = (typeof data === "object" && data.message)
-                    ? data.message
-                    : `Request failed with status ${response.status}`;
-                throw new Error(message);
-            }
+            const config = {
+                ...options,
+                headers: {
+                    ...defaultHeaders,
+                    ...(options.headers || {})
+                }
+            };
 
-            setBackendStatus(true);
-            return data;
-        } catch (err) {
-            if (err.name === "TypeError" && err.message.includes("fetch")) {
-                setBackendStatus(false, "Backend: Offline (Port 8080)");
-                throw new Error(`Unable to reach PowerTrack backend server at ${BASE_URL || "http://localhost:8080"}. Ensure PowerTrackServer is running.`);
+            try {
+                const response = await fetch(url, config);
+                const contentType = response.headers.get("content-type") || "";
+
+                let data;
+                if (contentType.includes("application/json")) {
+                    data = await response.json();
+                } else {
+                    data = await response.text();
+                }
+
+                if (!response.ok) {
+                    const message = (typeof data === "object" && data.message)
+                        ? data.message
+                        : `Request failed with status ${response.status}`;
+                    throw new Error(message);
+                }
+
+                setBackendStatus(true);
+                return data;
+            } catch (err) {
+                if (err.name === "TypeError" && err.message.includes("fetch")) {
+                    setBackendStatus(false, "Backend: Offline (Port 8080)");
+                    throw new Error(`Unable to reach PowerTrack backend server at ${BASE_URL || "http://localhost:8080"}. Ensure PowerTrackServer is running.`);
+                }
+                throw err;
             }
-            throw err;
+        })();
+
+        if (method === "GET") {
+            inFlightRequests.set(endpoint, requestPromise);
+            requestPromise.finally(() => inFlightRequests.delete(endpoint));
         }
+
+        return requestPromise;
     }
 
     // =========================================================
@@ -219,6 +238,12 @@
     // =========================================================
 
     function switchView(viewName) {
+        // Prevent duplicate re-initialization if the requested view is already active
+        const activeElem = document.querySelector(".app-view.active-view");
+        if (currentView === viewName && activeElem && activeElem.id === `view-${viewName === "role-selection" ? "role-selection" : (viewName + "-dashboard")}`) {
+            return;
+        }
+
         currentView = viewName;
 
         const roleView = document.getElementById("view-role-selection");
@@ -229,23 +254,31 @@
         if (govView) govView.classList.remove("active-view");
         if (techView) techView.classList.remove("active-view");
 
+        // Synchronize URL hash without re-triggering duplicate route listeners
+        const currentHash = (window.location.hash || "").replace("#", "").toLowerCase();
+        if (viewName === "government" && currentHash !== "government") {
+            window.location.hash = "government";
+        } else if (viewName === "technician" && currentHash !== "technician") {
+            window.location.hash = "technician";
+        } else if (viewName === "role-selection" && window.location.hash) {
+            history.replaceState(null, "", window.location.pathname);
+        }
+
         if (viewName === "government") {
             if (govView) govView.classList.add("active-view");
-            window.location.hash = "government";
             selectGovOperation(currentGovOperation);
             updateSystemMetrics();
         } else if (viewName === "technician") {
             if (techView) techView.classList.add("active-view");
-            window.location.hash = "technician";
-            loadTechnicianRosterOptions();
-            loadTechnicianContent();
-            updateSystemMetrics();
+            // Run independent initialization requests concurrently
+            Promise.all([
+                loadTechnicianRosterOptions(),
+                loadTechnicianContent(),
+                updateSystemMetrics()
+            ]);
         } else {
             // Default: Role Selection
             if (roleView) roleView.classList.add("active-view");
-            if (window.location.hash) {
-                history.replaceState(null, "", window.location.pathname);
-            }
             checkBackendHealth();
         }
 

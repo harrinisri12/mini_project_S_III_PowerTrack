@@ -10,8 +10,18 @@ import java.sql.SQLException;
 /**
  * Data Access Object for calculating live dashboard system statistics
  * directly from database records in Supabase PostgreSQL using optimized aggregate queries.
+ *
+ * Optimizations:
+ * - Single consolidated query using scalar sub-selects (replaces 4 sequential queries).
+ * - Short-TTL cache (3 seconds) to prevent redundant queries during rapid dashboard refreshes.
+ * - Explicit cache invalidation after write operations.
  */
 public class StatsDAO {
+
+    // Short-TTL cache to prevent repeated identical aggregate queries
+    private static volatile SystemStats cachedStats = null;
+    private static volatile long cachedStatsTimestamp = 0;
+    private static final long STATS_CACHE_TTL_MS = 3000; // 3 seconds
 
     public static class SystemStats {
         public final int totalConsumers;
@@ -61,108 +71,83 @@ public class StatsDAO {
     }
 
     /**
-     * Calculates grid statistics directly from database tables using fast conditional aggregates.
+     * Calculates grid statistics using a single consolidated query with scalar sub-selects,
+     * replacing the previous 4-query sequential approach.
+     * Results are cached for STATS_CACHE_TTL_MS to avoid redundant queries during rapid refreshes.
      */
     public SystemStats getSystemStats() throws SQLException {
-        int totalConsumers = 0;
-        int powerAvailable = 0;
-        int activeOutages = 0;
-        int assignedOutages = 0;
-        int inProgressOutages = 0;
-        int restoredOutages = 0;
-        int activeNodes = 0;
-        int availableTechnicians = 0;
+        // Check TTL cache first
+        long now = System.currentTimeMillis();
+        SystemStats cached = cachedStats;
+        if (cached != null && (now - cachedStatsTimestamp) < STATS_CACHE_TTL_MS) {
+            return cached;
+        }
 
         try (Connection conn = DatabaseConnection.getConnection()) {
             boolean hasPowerStatus = DatabaseConnection.columnExists(conn, "consumers", "power_status");
             boolean hasActiveNode = DatabaseConnection.columnExists(conn, "network_nodes", "is_active");
             boolean hasAvailTech = DatabaseConnection.columnExists(conn, "technicians", "availability_status");
 
-            // 1. Consumers aggregate (Total and Powered in 1 query)
-            String sqlConsumers = hasPowerStatus
-                ? "SELECT COUNT(*) AS total, " +
-                  "COUNT(CASE WHEN power_status::text = 'true' OR power_status::text = 'POWER ON' OR power_status::text = 't' THEN 1 END) AS powered " +
-                  "FROM consumers"
-                : "SELECT COUNT(*) AS total, COUNT(*) AS powered FROM consumers";
+            // Build a single consolidated query using scalar sub-selects
+            StringBuilder sql = new StringBuilder("SELECT ");
 
-            try (PreparedStatement stmt = conn.prepareStatement(sqlConsumers);
-                 ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
-                    totalConsumers = rs.getInt("total");
-                    powerAvailable = rs.getInt("powered");
-                }
+            // Consumer counts
+            sql.append("(SELECT COUNT(*) FROM consumers) AS total_consumers, ");
+            if (hasPowerStatus) {
+                sql.append("(SELECT COUNT(*) FROM consumers WHERE power_status::text IN ('true','POWER ON','t')) AS powered_consumers, ");
+            } else {
+                sql.append("(SELECT COUNT(*) FROM consumers) AS powered_consumers, ");
             }
 
-            // 2. Outages aggregates (active, assigned, in-progress, restored in 1 query)
-            String sqlOutages = "SELECT " +
-                                "COUNT(CASE WHEN status != 'RESTORED' THEN 1 END) AS active_count, " +
-                                "COUNT(CASE WHEN status = 'ASSIGNED' OR (technician_assignments_count > 0 AND status = 'ACTIVE') THEN 1 END) AS assigned_count, " +
-                                "COUNT(CASE WHEN status = 'IN PROGRESS' THEN 1 END) AS in_progress_count, " +
-                                "COUNT(CASE WHEN status = 'RESTORED' THEN 1 END) AS restored_count " +
-                                "FROM (" +
-                                "   SELECT o.status, " +
-                                "   (SELECT COUNT(*) FROM technician_assignments ta WHERE ta.outage_id = o.outage_id) AS technician_assignments_count " +
-                                "   FROM outages o" +
-                                ") sub";
-            try (PreparedStatement stmt = conn.prepareStatement(sqlOutages);
-                 ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
-                    activeOutages = rs.getInt("active_count");
-                    assignedOutages = rs.getInt("assigned_count");
-                    inProgressOutages = rs.getInt("in_progress_count");
-                    restoredOutages = rs.getInt("restored_count");
-                }
-            } catch (SQLException fallback) {
-                // Simpler fallback query if subquery fails
-                String simpleSql = "SELECT " +
-                                   "COUNT(CASE WHEN status != 'RESTORED' THEN 1 END) AS active_count, " +
-                                   "COUNT(CASE WHEN status = 'IN PROGRESS' THEN 1 END) AS in_progress_count, " +
-                                   "COUNT(CASE WHEN status = 'RESTORED' THEN 1 END) AS restored_count " +
-                                   "FROM outages";
-                try (PreparedStatement stmt2 = conn.prepareStatement(simpleSql);
-                     ResultSet rs2 = stmt2.executeQuery()) {
-                    if (rs2.next()) {
-                        activeOutages = rs2.getInt("active_count");
-                        inProgressOutages = rs2.getInt("in_progress_count");
-                        restoredOutages = rs2.getInt("restored_count");
-                    }
-                }
+            // Outage counts
+            sql.append("(SELECT COUNT(*) FROM outages WHERE status != 'RESTORED') AS active_outages, ");
+            sql.append("(SELECT COUNT(*) FROM outages WHERE assigned_technician_id IS NOT NULL AND status != 'RESTORED' AND status != 'IN PROGRESS') AS assigned_outages, ");
+            sql.append("(SELECT COUNT(*) FROM outages WHERE status = 'IN PROGRESS') AS in_progress_outages, ");
+            sql.append("(SELECT COUNT(*) FROM outages WHERE status = 'RESTORED') AS restored_outages, ");
+
+            // Node counts
+            if (hasActiveNode) {
+                sql.append("(SELECT COUNT(*) FROM network_nodes WHERE is_active = TRUE) AS active_nodes, ");
+            } else {
+                sql.append("(SELECT COUNT(*) FROM network_nodes) AS active_nodes, ");
             }
 
-            // 3. Active network nodes in 1 query
-            String sqlNodes = hasActiveNode
-                ? "SELECT COUNT(*) FROM network_nodes WHERE is_active = TRUE"
-                : "SELECT COUNT(*) FROM network_nodes";
-
-            try (PreparedStatement stmt = conn.prepareStatement(sqlNodes);
-                 ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
-                    activeNodes = rs.getInt(1);
-                }
+            // Technician counts
+            if (hasAvailTech) {
+                sql.append("(SELECT COUNT(*) FROM technicians WHERE availability_status::text IN ('true','AVAILABLE','t')) AS available_techs");
+            } else {
+                sql.append("(SELECT COUNT(*) FROM technicians) AS available_techs");
             }
 
-            // 4. Available technicians in 1 query
-            String sqlTech = hasAvailTech
-                ? "SELECT COUNT(*) FROM technicians WHERE availability_status::text = 'true' OR availability_status::text = 'AVAILABLE' OR availability_status::text = 't'"
-                : "SELECT COUNT(*) FROM technicians";
-
-            try (PreparedStatement stmt = conn.prepareStatement(sqlTech);
+            try (PreparedStatement stmt = conn.prepareStatement(sql.toString());
                  ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
-                    availableTechnicians = rs.getInt(1);
+                    SystemStats result = new SystemStats(
+                        rs.getInt("total_consumers"),
+                        rs.getInt("powered_consumers"),
+                        rs.getInt("active_outages"),
+                        rs.getInt("assigned_outages"),
+                        rs.getInt("in_progress_outages"),
+                        rs.getInt("restored_outages"),
+                        rs.getInt("active_nodes"),
+                        rs.getInt("available_techs")
+                    );
+                    cachedStats = result;
+                    cachedStatsTimestamp = System.currentTimeMillis();
+                    return result;
                 }
             }
         }
 
-        return new SystemStats(
-            totalConsumers,
-            powerAvailable,
-            activeOutages,
-            assignedOutages,
-            inProgressOutages,
-            restoredOutages,
-            activeNodes,
-            availableTechnicians
-        );
+        return new SystemStats(0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    /**
+     * Invalidates the cached stats so the next call re-queries the database.
+     * Called after write operations that change outage, consumer, or technician state.
+     */
+    public static void invalidateCache() {
+        cachedStats = null;
+        cachedStatsTimestamp = 0;
     }
 }

@@ -110,7 +110,7 @@ public class DatabaseConnection {
             Connection candidate = pool.poll();
             if (candidate != null) {
                 try {
-                    if (!candidate.isClosed() && candidate.isValid(2)) {
+                    if (!candidate.isClosed() && candidate.isValid(1)) {
                         physicalConn = candidate;
                         break;
                     } else {
@@ -144,8 +144,9 @@ public class DatabaseConnection {
             }
 
             if (physicalConn == null) {
-                // Last resort: create a direct physical connection if pool is exhausted
-                physicalConn = createNewPhysicalConnection();
+                throw new SQLException("Database connection pool exhausted. All " + MAX_POOL_SIZE
+                    + " connections are currently in use and none became available within "
+                    + CONNECTION_TIMEOUT_SEC + " seconds.");
             }
         }
 
@@ -229,7 +230,7 @@ public class DatabaseConnection {
     private static void recyclePhysicalConnection(Connection physical) {
         if (physical == null) return;
         try {
-            if (!physical.isClosed() && physical.isValid(2)) {
+            if (!physical.isClosed() && physical.isValid(1)) {
                 if (!physical.getAutoCommit()) {
                     physical.rollback();
                     physical.setAutoCommit(true);

@@ -3,6 +3,7 @@ package service;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 
 import database.DatabaseConnection;
@@ -61,9 +62,6 @@ public class ElectricitySystem {
     private int nextOutageId;
     private int nextQueueSequence;
 
-    // Currently processed outage
-    private Outage currentOutage;
-
     // Database DAOs
     private final ConsumerDAO consumerDAO = new ConsumerDAO();
     private final NetworkDAO networkDAO = new NetworkDAO();
@@ -92,8 +90,6 @@ public class ElectricitySystem {
 
         nextOutageId = 1001;
         nextQueueSequence = 1;
-
-        currentOutage = null;
 
         initializeSystem();
     }
@@ -144,7 +140,7 @@ public class ElectricitySystem {
         List<NetworkNode> dbNodes = networkDAO.getAllNodes();
         for (NetworkNode node : dbNodes) {
             addNetworkNode(node);
-            electricityGraph.addNode(node.getNodeId());
+            electricityGraph.addNode(node.getNodeId(), node.getNodeType());
         }
 
         // 2. Directed network connections into Graph from Supabase
@@ -177,8 +173,6 @@ public class ElectricitySystem {
 
             if ("ACTIVE".equalsIgnoreCase(o.getStatus())) {
                 outageQueue.enqueue(o);
-            } else if ("IN PROGRESS".equalsIgnoreCase(o.getStatus())) {
-                this.currentOutage = o;
             }
         }
 
@@ -324,32 +318,28 @@ public class ElectricitySystem {
         outage.setPriorityTier(eval.getPriorityTier());
         outage.setCriticalFacilities(eval.getCriticalFacilities());
         outage.setPriorityReason(eval.getPriorityReason());
-        outage.setQueueSequence(nextQueueSequence++);
+        outage.setQueueSequence(nextQueueSequence);
         outage.setStatus("ACTIVE");
 
-        // Update consumer power in memory
-        updateConsumerPower(affectedAreas);
-
-        // Step 11: Insert into priority queue
-        outageQueue.enqueue(outage);
-
-        // Store in memory list
-        addOutage(outage);
-        nextOutageId++;
-
-        // Step 12: Persist outage in PostgreSQL using atomic transaction
+        // Step 12: Persist outage in PostgreSQL FIRST using atomic transaction
+        // Memory state is updated only AFTER successful database commit to ensure complete consistency
         try {
             List<Integer> affectedIds = consumerDAO.getConsumerIdsByAreas(affectedAreas, null);
             outageDAO.insertOutageTransaction(outage, affectedIds);
         } catch (SQLException e) {
-            // Rollback memory changes on database failure
-            outageQueue.remove(outage);
-            restoreConsumerPower(affectedAreas);
+            // Rollback node status on failure; no other in-memory state was modified yet
             setNodeStatus(failedComponent, true);
             String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
             System.err.println("[PowerTrack Database Error] Failed to persist outage to Supabase: " + sanitized);
             throw new RuntimeException("Database error persisting outage to Supabase: " + sanitized, e);
         }
+
+        // Database transaction committed successfully — now apply in-memory updates
+        nextQueueSequence++;
+        updateConsumerPower(affectedAreas);
+        outageQueue.enqueue(outage);
+        addOutage(outage);
+        nextOutageId++;
 
         return outage;
     }
@@ -363,9 +353,11 @@ public class ElectricitySystem {
     }
 
     private int countAffectedConsumers(ArrayList<String> affectedAreas) {
+        if (affectedAreas == null || affectedAreas.isEmpty()) return 0;
+        HashSet<String> areaSet = new HashSet<>(affectedAreas);
         int count = 0;
         for (int i = 0; i < consumerCount; i++) {
-            if (consumers[i] != null && affectedAreas.contains(consumers[i].getArea())) {
+            if (consumers[i] != null && areaSet.contains(consumers[i].getArea())) {
                 count++;
             }
         }
@@ -373,16 +365,20 @@ public class ElectricitySystem {
     }
 
     private void updateConsumerPower(ArrayList<String> affectedAreas) {
+        if (affectedAreas == null || affectedAreas.isEmpty()) return;
+        HashSet<String> areaSet = new HashSet<>(affectedAreas);
         for (int i = 0; i < consumerCount; i++) {
-            if (consumers[i] != null && affectedAreas.contains(consumers[i].getArea())) {
+            if (consumers[i] != null && areaSet.contains(consumers[i].getArea())) {
                 consumers[i].setPowerAvailable(false);
             }
         }
     }
 
     private void restoreConsumerPower(ArrayList<String> affectedAreas) {
+        if (affectedAreas == null || affectedAreas.isEmpty()) return;
+        HashSet<String> areaSet = new HashSet<>(affectedAreas);
         for (int i = 0; i < consumerCount; i++) {
-            if (consumers[i] != null && affectedAreas.contains(consumers[i].getArea())) {
+            if (consumers[i] != null && areaSet.contains(consumers[i].getArea())) {
                 consumers[i].setPowerAvailable(true);
             }
         }
@@ -438,9 +434,10 @@ public class ElectricitySystem {
 
         int highestTier = 1;
 
+        HashSet<String> areaSet = new HashSet<>(affectedAreas != null ? affectedAreas : new ArrayList<>());
         for (int i = 0; i < consumerCount; i++) {
             Consumer c = consumers[i];
-            if (c != null && affectedAreas.contains(c.getArea())) {
+            if (c != null && areaSet.contains(c.getArea())) {
                 int tier = c.getCriticalityTier();
 
                 if (tier == 5) {
@@ -518,14 +515,7 @@ public class ElectricitySystem {
             return null;
         }
 
-        // Prevent one technician from receiving multiple active assignments
-        technician.setAvailable(false);
-        outage.setAssignedTechnician(technician.getName());
-        outage.setAssignedTechnicianId(technician.getTechnicianId());
-        outage.setStatus("IN PROGRESS");
-        this.currentOutage = outage;
-
-        // Persist assignment to Supabase (Transaction)
+        // Persist assignment to Supabase FIRST (Atomic Transaction)
         try {
             outageDAO.assignTechnicianTransaction(
                 outage.getOutageId(),
@@ -533,16 +523,18 @@ public class ElectricitySystem {
                 technician.getName()
             );
         } catch (SQLException e) {
-            // Rollback on failure
-            technician.setAvailable(true);
-            outage.setAssignedTechnician("NOT ASSIGNED");
-            outage.setAssignedTechnicianId(null);
-            outage.setStatus("ACTIVE");
+            // Re-enqueue outage on database failure; in-memory status was not modified
             outageQueue.enqueue(outage);
             String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
             System.err.println("[PowerTrack Database Error] Failed to persist dispatch to Supabase: " + sanitized);
             throw new RuntimeException("Database error persisting dispatch to Supabase: " + sanitized, e);
         }
+
+        // Database commit succeeded — now apply in-memory state updates
+        technician.setAvailable(false);
+        outage.setAssignedTechnician(technician.getName());
+        outage.setAssignedTechnicianId(technician.getTechnicianId());
+        outage.setStatus("IN PROGRESS");
 
         return outage;
     }
@@ -565,7 +557,7 @@ public class ElectricitySystem {
             }
         }
 
-        // Second pass: fallback to general Distribution specialists
+        // Second pass: fallback to compatible general Distribution specialists
         for (int i = 0; i < technicianCount; i++) {
             if (technicians[i] != null
                     && technicians[i].isAvailable()
@@ -574,13 +566,7 @@ public class ElectricitySystem {
             }
         }
 
-        // Third pass: any available technician
-        for (int i = 0; i < technicianCount; i++) {
-            if (technicians[i] != null && technicians[i].isAvailable()) {
-                return technicians[i];
-            }
-        }
-
+        // Do not assign technicians with unrelated specializations (e.g. linesmen to transformers)
         return null;
     }
 
@@ -607,47 +593,33 @@ public class ElectricitySystem {
             throw new IllegalStateException("Outage OUT-" + outageId + " must be IN PROGRESS before restoration (Current status: " + outage.getStatus() + ").");
         }
 
-        // 1. Restore network component
-        setNodeStatus(outage.getFailedComponent(), true);
-
-        // 2. Restore affected consumers
-        restoreConsumerPower(outage.getAffectedAreas());
-
-        // 3. Make technician available again
+        // Gather restoration metadata prior to transaction
+        String failedComponent = outage.getFailedComponent();
+        ArrayList<String> affectedAreas = outage.getAffectedAreas();
         String technicianName = outage.getAssignedTechnician();
         Integer technicianId = outage.getAssignedTechnicianId();
 
-        for (int i = 0; i < technicianCount; i++) {
-            if (technicians[i] != null && (technicians[i].getName().equalsIgnoreCase(technicianName)
-                    || (technicianId != null && technicians[i].getTechnicianId() == technicianId))) {
-                technicians[i].setAvailable(true);
-                if (technicianId == null) {
+        // Resolve technician ID from name if needed
+        if (technicianId == null && technicianName != null && !"NOT ASSIGNED".equalsIgnoreCase(technicianName)) {
+            for (int i = 0; i < technicianCount; i++) {
+                if (technicians[i] != null && technicians[i].getName().equalsIgnoreCase(technicianName)) {
                     technicianId = technicians[i].getTechnicianId();
+                    break;
                 }
-                break;
             }
         }
 
-        // 4. Update outage record in memory
-        outage.setStatus("RESTORED");
-        outage.setRestoredAt(new java.sql.Timestamp(System.currentTimeMillis()));
-        if (currentOutage != null && currentOutage.getOutageId() == outageId) {
-            currentOutage = null;
-        }
-
-        // Remove from queue if still present
-        outageQueue.remove(outage);
-
-        // 5. Persist restoration to Supabase (Atomic Transaction)
+        // 1. Persist restoration to Supabase FIRST (Atomic Database Transaction)
+        // Memory state is updated ONLY after the database confirms commit
         try {
             String details = (restorationDetails != null && !restorationDetails.trim().isEmpty())
                 ? restorationDetails.trim()
-                : ("Component " + outage.getFailedComponent() + " re-energized. Normal power supply restored to downstream consumers.");
+                : ("Component " + failedComponent + " re-energized. Normal power supply restored to downstream consumers.");
 
             outageDAO.restoreOutageTransaction(
                 outageId,
-                outage.getFailedComponent(),
-                outage.getAffectedAreas(),
+                failedComponent,
+                affectedAreas,
                 technicianId,
                 technicianName,
                 details
@@ -657,6 +629,26 @@ public class ElectricitySystem {
             System.err.println("[PowerTrack Database Error] Failed to persist restoration to Supabase: " + sanitized);
             throw new RuntimeException("Database error persisting restoration to Supabase: " + sanitized, e);
         }
+
+        // 2. Database commit succeeded — now update all in-memory state
+        setNodeStatus(failedComponent, true);
+        restoreConsumerPower(affectedAreas);
+
+        // Release technician back to available
+        for (int i = 0; i < technicianCount; i++) {
+            if (technicians[i] != null && (technicians[i].getName().equalsIgnoreCase(technicianName)
+                    || (technicianId != null && technicians[i].getTechnicianId() == technicianId))) {
+                technicians[i].setAvailable(true);
+                break;
+            }
+        }
+
+        // Update outage record in memory
+        outage.setStatus("RESTORED");
+        outage.setRestoredAt(new java.sql.Timestamp(System.currentTimeMillis()));
+
+        // Remove from queue if still present
+        outageQueue.remove(outage);
     }
 
     // =========================================
@@ -683,15 +675,7 @@ public class ElectricitySystem {
             throw new IllegalStateException("Technician " + technician.getName() + " is already assigned to another active outage. One technician cannot hold multiple active assignments.");
         }
 
-        technician.setAvailable(false);
-        outage.setAssignedTechnician(technician.getName());
-        outage.setAssignedTechnicianId(technician.getTechnicianId());
-        outage.setStatus("IN PROGRESS");
-        this.currentOutage = outage;
-
-        // Remove from priority restoration queue
-        outageQueue.remove(outage);
-
+        // Persist assignment to Supabase FIRST (Atomic Database Transaction)
         try {
             outageDAO.assignTechnicianTransaction(
                 outage.getOutageId(),
@@ -699,15 +683,19 @@ public class ElectricitySystem {
                 technician.getName()
             );
         } catch (SQLException e) {
-            technician.setAvailable(true);
-            outage.setAssignedTechnician("NOT ASSIGNED");
-            outage.setAssignedTechnicianId(null);
-            outage.setStatus("ACTIVE");
-            outageQueue.enqueue(outage);
             String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
             System.err.println("[PowerTrack Database Error] Failed to persist assignment to Supabase: " + sanitized);
             throw new RuntimeException("Database error persisting assignment to Supabase: " + sanitized, e);
         }
+
+        // Database commit succeeded — now update in-memory state
+        technician.setAvailable(false);
+        outage.setAssignedTechnician(technician.getName());
+        outage.setAssignedTechnicianId(technician.getTechnicianId());
+        outage.setStatus("IN PROGRESS");
+
+        // Remove from priority restoration queue
+        outageQueue.remove(outage);
 
         return outage;
     }
@@ -845,9 +833,5 @@ public class ElectricitySystem {
 
     public TechnicianDAO getTechnicianDAO() {
         return technicianDAO;
-    }
-
-    public synchronized Outage getCurrentOutage() {
-        return currentOutage;
     }
 }

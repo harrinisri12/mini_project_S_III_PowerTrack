@@ -16,12 +16,34 @@ public class Graph {
 
     // Adjacency List: maps each Node ID to its list of downstream connected neighbor Node IDs
     private final HashMap<String, ArrayList<String>> adjacencyList;
+    // Map of Node ID to its network node type (e.g. 'SUBSTATION', 'FEEDER', 'TRANSFORMER', 'AREA')
+    private final HashMap<String, String> nodeTypes;
 
     /**
      * Initializes an empty directed graph.
      */
     public Graph() {
         this.adjacencyList = new HashMap<>();
+        this.nodeTypes = new HashMap<>();
+    }
+
+    /**
+     * Adds an electrical network node with its grid classification type.
+     *
+     * @param nodeId unique node identifier
+     * @param nodeType node classification type
+     */
+    public synchronized void addNode(String nodeId, String nodeType) {
+        if (nodeId == null || nodeId.trim().isEmpty()) {
+            return;
+        }
+        String normalized = nodeId.trim().toUpperCase();
+        if (!adjacencyList.containsKey(normalized)) {
+            adjacencyList.put(normalized, new ArrayList<>());
+        }
+        if (nodeType != null && !nodeType.trim().isEmpty()) {
+            nodeTypes.put(normalized, nodeType.trim().toUpperCase());
+        }
     }
 
     /**
@@ -30,13 +52,7 @@ public class Graph {
      * @param nodeId unique node identifier (e.g., 'SS-ERD-01', 'FD-ERD-01', 'DT-ERD-101')
      */
     public synchronized void addNode(String nodeId) {
-        if (nodeId == null || nodeId.trim().isEmpty()) {
-            return;
-        }
-        String normalized = nodeId.trim().toUpperCase();
-        if (!adjacencyList.containsKey(normalized)) {
-            adjacencyList.put(normalized, new ArrayList<>());
-        }
+        addNode(nodeId, null);
     }
 
     /**
@@ -161,21 +177,24 @@ public class Graph {
     }
 
     /**
-     * Dynamically discovers all downstream distribution areas (nodes prefixed with 'AREA-')
-     * affected by a fault at the given component, using downstream BFS traversal.
+     * Dynamically discovers all downstream distribution areas affected by a fault
+     * at the given component, using downstream BFS traversal.
+     * Uses actual network node types when registered, with ID-prefix fallback.
+     * Uses a HashSet to ensure O(1) deduplication.
      *
      * @param startNode component where the fault occurred
      * @return ArrayList of affected locality area IDs
      */
     public synchronized ArrayList<String> getDownstreamAreas(String startNode) {
         ArrayList<String> affectedAreas = new ArrayList<>();
+        HashSet<String> visitedAreas = new HashSet<>();
         ArrayList<String> downstreamNodes = bfs(startNode);
 
         for (String node : downstreamNodes) {
-            if (node.startsWith("AREA-")) {
-                if (!affectedAreas.contains(node)) {
-                    affectedAreas.add(node);
-                }
+            String type = nodeTypes.get(node);
+            boolean isArea = (type != null && "AREA".equalsIgnoreCase(type)) || node.startsWith("AREA-");
+            if (isArea && visitedAreas.add(node)) {
+                affectedAreas.add(node);
             }
         }
 
