@@ -5,13 +5,25 @@ public class NetworkNode {
     private String nodeId;
     private String nodeName;
     private String nodeType;
+    private String gridLocalityArea;
     private boolean active;
 
     public NetworkNode(String nodeId, String nodeName, String nodeType) {
+        this(nodeId, nodeName, nodeType, null, true);
+    }
+
+    public NetworkNode(
+        String nodeId,
+        String nodeName,
+        String nodeType,
+        String gridLocalityArea,
+        boolean active
+    ) {
         this.nodeId = nodeId;
         this.nodeName = nodeName;
         this.nodeType = nodeType;
-        this.active = true;
+        this.gridLocalityArea = gridLocalityArea;
+        this.active = active;
     }
 
     public String getNodeId() {
@@ -24,6 +36,14 @@ public class NetworkNode {
 
     public String getNodeType() {
         return nodeType;
+    }
+
+    public String getGridLocalityArea() {
+        return gridLocalityArea;
+    }
+
+    public void setGridLocalityArea(String gridLocalityArea) {
+        this.gridLocalityArea = gridLocalityArea;
     }
 
     public boolean isActive() {

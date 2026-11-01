@@ -1,15 +1,63 @@
 import java.util.Scanner;
 
 import service.ElectricitySystem;
+import database.DatabaseConnection;
 
+/**
+ * ==============================================================================
+ * PowerTrack: Alternative Interactive Console (CLI) Entry Point
+ * ==============================================================================
+ * Purpose in Project:
+ *   - Serves as an interactive terminal-based test harness for college viva & demos.
+ *   - Allows demonstrating core Java algorithms (Priority Queue, Graph traversals,
+ *     fault simulation, and crew dispatch) directly without needing a browser.
+ *   - The primary web application entry point is PowerTrackServer.java.
+ * ==============================================================================
+ */
 public class Main {
 
     public static void main(String[] args) {
 
-        Scanner scanner = new Scanner(System.in);
+        System.out.println();
+        System.out.println("==============================================");
+        System.out.println("                 POWERTRACK");
+        System.out.println("   SMART ELECTRICITY OUTAGE SYSTEM (TAMIL NADU)");
+        System.out.println("==============================================");
 
-        ElectricitySystem system =
-            new ElectricitySystem();
+        if (!DatabaseConnection.isConfigured()) {
+            System.err.println();
+            System.err.println("[PowerTrack Fatal Error] Supabase database credentials are not configured.");
+            System.err.println("Required environment variables: SUPABASE_DB_URL, SUPABASE_DB_USER, SUPABASE_DB_PASSWORD.");
+            System.err.println("In-memory offline fallback is completely disabled. Startup halted.");
+            System.err.println("==============================================");
+            System.exit(1);
+            return;
+        }
+
+        if (!DatabaseConnection.testConnection()) {
+            System.err.println();
+            System.err.println("[PowerTrack Fatal Error] Cannot connect to Supabase PostgreSQL database.");
+            System.err.println("Please verify database status, network connectivity, and credentials.");
+            System.err.println("In-memory offline fallback is completely disabled. Startup halted.");
+            System.err.println("==============================================");
+            System.exit(1);
+            return;
+        }
+
+        ElectricitySystem system;
+        try {
+            system = new ElectricitySystem();
+        } catch (Exception e) {
+            System.err.println();
+            System.err.println("[PowerTrack Fatal Error] Failed to load data from Supabase: "
+                    + DatabaseConnection.sanitizeErrorMessage(e.getMessage()));
+            System.err.println("In-memory offline fallback is completely disabled. Startup halted.");
+            System.err.println("==============================================");
+            System.exit(1);
+            return;
+        }
+
+        Scanner scanner = new Scanner(System.in);
 
         while (true) {
 
@@ -122,49 +170,7 @@ public class Main {
 
                     System.out.println();
 
-                    System.out.println(
-                        "Available Distribution Components:"
-                    );
-
-                    System.out.println(
-                        "FD-ERD-01  - Erode North Feeder"
-                    );
-
-                    System.out.println(
-                        "FD-PER-02  - SIPCOT Industrial Feeder"
-                    );
-
-                    System.out.println(
-                        "FD-CHN-03  - Chennimalai Feeder"
-                    );
-
-                    System.out.println(
-                        "FD-AVI-04  - Avinashi Feeder"
-                    );
-
-                    System.out.println(
-                        "FD-TPR-05  - Rayapuram Feeder"
-                    );
-
-                    System.out.println(
-                        "DT-ERD-101 - Kumalan Kuttai Transformer"
-                    );
-
-                    System.out.println(
-                        "DT-PER-102 - SIPCOT Phase-I Transformer"
-                    );
-
-                    System.out.println(
-                        "DT-CHN-103 - Chennimalai Town Transformer"
-                    );
-
-                    System.out.println(
-                        "DT-AVI-104 - Avinashi Main Transformer"
-                    );
-
-                    System.out.println(
-                        "DT-TPR-105 - Rayapuram Textile Transformer"
-                    );
+                    system.displayAvailableComponents();
 
                     System.out.println();
 

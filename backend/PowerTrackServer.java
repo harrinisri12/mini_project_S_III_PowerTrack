@@ -3,32 +3,98 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import service.ElectricitySystem;
+import database.DatabaseConnection;
 
 import java.io.*;
-import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import model.Consumer;
+import model.NetworkConnection;
 import model.NetworkNode;
 import model.Outage;
 import model.Technician;
+import datastructure.Graph;
+import datastructure.Queue;
 
+/**
+ * ==============================================================================
+ * PowerTrack: Web Application Server (Primary Entry Point)
+ * ==============================================================================
+ * Architecture:
+ *   - Utilizes Java's native com.sun.net.httpserver.HttpServer (no heavy external
+ *     frameworks like Spring Boot needed, making it lightweight and easy to review).
+ *   - Runs on port 8080.
+ *   - Serves both REST JSON APIs (/api/*) and static frontend assets (HTML, CSS, JS).
+ *   - Connects directly to Supabase PostgreSQL via JDBC for persistent grid data.
+ * ==============================================================================
+ */
 public class PowerTrackServer {
 
     private static final int PORT = 8080;
 
-    private static final ElectricitySystem system =
-            new ElectricitySystem();
+    private static ElectricitySystem system;
 
     private static final String FRONTEND_PATH =
             "../frontend";
 
     public static void main(String[] args) throws Exception {
+
+        System.out.println();
+        System.out.println(
+                "=============================================="
+        );
+        System.out.println(
+                "                 POWERTRACK"
+        );
+        System.out.println(
+                "      SMART ELECTRICITY OUTAGE SYSTEM"
+        );
+        System.out.println(
+                "=============================================="
+        );
+
+        // =========================================
+        // STRICT DATABASE STARTUP VALIDATION
+        // =========================================
+        if (!DatabaseConnection.isConfigured()) {
+            System.err.println();
+            System.err.println("[PowerTrack Fatal Error] Supabase database credentials are not configured.");
+            System.err.println("Required environment variables: SUPABASE_DB_URL, SUPABASE_DB_USER, SUPABASE_DB_PASSWORD.");
+            System.err.println("In-memory offline fallback is completely disabled. Backend startup halted.");
+            System.err.println("==============================================");
+            System.exit(1);
+            return;
+        }
+
+        if (!DatabaseConnection.testConnection()) {
+            System.err.println();
+            System.err.println("[PowerTrack Fatal Error] Cannot connect to Supabase PostgreSQL database.");
+            System.err.println("Please verify database status, network connectivity, and credentials.");
+            System.err.println("In-memory offline fallback is completely disabled. Backend startup halted.");
+            System.err.println("==============================================");
+            System.exit(1);
+            return;
+        }
+
+        try {
+            system = new ElectricitySystem();
+        } catch (Exception e) {
+            System.err.println();
+            System.err.println("[PowerTrack Fatal Error] Failed to initialize system from Supabase: "
+                    + DatabaseConnection.sanitizeErrorMessage(e.getMessage()));
+            System.err.println("In-memory offline fallback is completely disabled. Backend startup halted.");
+            System.err.println("==============================================");
+            System.exit(1);
+            return;
+        }
 
         HttpServer server =
                 HttpServer.create(
@@ -81,8 +147,23 @@ public class PowerTrackServer {
         );
 
         server.createContext(
+                "/api/outages/assign",
+                PowerTrackServer::handleAssign
+        );
+
+        server.createContext(
+                "/api/outages/update-status",
+                PowerTrackServer::handleUpdateStatus
+        );
+
+        server.createContext(
                 "/api/stats",
                 PowerTrackServer::handleStats
+        );
+
+        server.createContext(
+                "/api/health",
+                PowerTrackServer::handleHealth
         );
 
         // =========================================
@@ -97,20 +178,6 @@ public class PowerTrackServer {
         server.setExecutor(null);
 
         server.start();
-
-        System.out.println();
-        System.out.println(
-                "=============================================="
-        );
-        System.out.println(
-                "                 POWERTRACK"
-        );
-        System.out.println(
-                "      SMART ELECTRICITY OUTAGE SYSTEM"
-        );
-        System.out.println(
-                "=============================================="
-        );
 
         System.out.println(
                 "Server started successfully!"
@@ -217,55 +284,39 @@ public class PowerTrackServer {
         }
 
         try {
+            List<NetworkNode> nodes = system.getNetworkDAO().getAllNodes();
+            List<NetworkConnection> conns = system.getNetworkDAO().getAllConnections();
 
-            Field field =
-                    ElectricitySystem.class
-                            .getDeclaredField(
-                                    "networkNodes"
-                            );
+            Map<String, List<String>> connectionMap = new HashMap<>();
+            for (NetworkConnection conn : conns) {
+                connectionMap.computeIfAbsent(conn.getSourceNodeId(), k -> new ArrayList<>()).add(conn.getDestinationNodeId());
+            }
 
-            field.setAccessible(true);
+            StringBuilder json = new StringBuilder("[");
 
-            NetworkNode[] nodes =
-                    (NetworkNode[]) field.get(system);
-
-            StringBuilder json =
-                    new StringBuilder("[");
-
-            for (NetworkNode node : nodes) {
-
-                if (node == null) {
-                    break;
-                }
-
-                if (json.length() > 1) {
+            for (int i = 0; i < nodes.size(); i++) {
+                NetworkNode node = nodes.get(i);
+                if (i > 0) {
                     json.append(",");
                 }
 
                 json.append("{");
+                json.append("\"id\":\"").append(escape(node.getNodeId())).append("\",");
+                json.append("\"name\":\"").append(escape(node.getNodeName())).append("\",");
+                json.append("\"type\":\"").append(escape(node.getNodeType())).append("\",");
+                json.append("\"active\":").append(node.isActive());
 
-                json.append(
-                        "\"id\":\""
-                                + escape(node.getNodeId())
-                                + "\","
-                );
-
-                json.append(
-                        "\"name\":\""
-                                + escape(node.getNodeName())
-                                + "\","
-                );
-
-                json.append(
-                        "\"type\":\""
-                                + escape(node.getNodeType())
-                                + "\","
-                );
-
-                json.append(
-                        "\"active\":"
-                                + node.isActive()
-                );
+                List<String> neighbors = connectionMap.get(node.getNodeId());
+                json.append(",\"connectedTo\":[");
+                if (neighbors != null) {
+                    for (int j = 0; j < neighbors.size(); j++) {
+                        if (j > 0) {
+                            json.append(",");
+                        }
+                        json.append("\"").append(escape(neighbors.get(j))).append("\"");
+                    }
+                }
+                json.append("]");
 
                 json.append("}");
             }
@@ -278,8 +329,13 @@ public class PowerTrackServer {
                     json.toString()
             );
 
+        } catch (SQLException e) {
+            sendError(
+                    exchange,
+                    503,
+                    "Database connection unavailable: " + DatabaseConnection.sanitizeErrorMessage(e.getMessage())
+            );
         } catch (Exception e) {
-
             sendError(
                     exchange,
                     500,
@@ -318,60 +374,23 @@ public class PowerTrackServer {
         }
 
         try {
+            List<Consumer> consumers = system.getConsumerDAO().getAllConsumers();
 
-            Field field =
-                    ElectricitySystem.class
-                            .getDeclaredField(
-                                    "consumers"
-                            );
+            StringBuilder json = new StringBuilder("[");
 
-            field.setAccessible(true);
-
-            Consumer[] consumers =
-                    (Consumer[]) field.get(system);
-
-            StringBuilder json =
-                    new StringBuilder("[");
-
-            for (Consumer consumer : consumers) {
-
-                if (consumer == null) {
-                    break;
-                }
-
-                if (json.length() > 1) {
+            for (int i = 0; i < consumers.size(); i++) {
+                Consumer consumer = consumers.get(i);
+                if (i > 0) {
                     json.append(",");
                 }
 
                 json.append("{");
-
-                json.append(
-                        "\"id\":"
-                                + consumer.getConsumerId()
-                                + ","
-                );
-
-                json.append(
-                        "\"name\":\""
-                                + escape(
-                                    consumer.getName()
-                                )
-                                + "\","
-                );
-
-                json.append(
-                        "\"area\":\""
-                                + escape(
-                                    consumer.getArea()
-                                )
-                                + "\","
-                );
-
-                json.append(
-                        "\"powerAvailable\":"
-                                + consumer.isPowerAvailable()
-                );
-
+                json.append("\"id\":").append(consumer.getConsumerId()).append(",");
+                json.append("\"name\":\"").append(escape(consumer.getName())).append("\",");
+                json.append("\"area\":\"").append(escape(consumer.getArea())).append("\",");
+                json.append("\"powerAvailable\":").append(consumer.isPowerAvailable()).append(",");
+                json.append("\"consumerType\":\"").append(escape(consumer.getConsumerType())).append("\",");
+                json.append("\"criticalityLevel\":\"").append(escape(consumer.getCriticalityLevel())).append("\"");
                 json.append("}");
             }
 
@@ -383,8 +402,13 @@ public class PowerTrackServer {
                     json.toString()
             );
 
+        } catch (SQLException e) {
+            sendError(
+                    exchange,
+                    503,
+                    "Database connection unavailable: " + DatabaseConnection.sanitizeErrorMessage(e.getMessage())
+            );
         } catch (Exception e) {
-
             sendError(
                     exchange,
                     500,
@@ -423,61 +447,21 @@ public class PowerTrackServer {
         }
 
         try {
+            List<Technician> technicians = system.getTechnicianDAO().getAllTechnicians();
 
-            Field field =
-                    ElectricitySystem.class
-                            .getDeclaredField(
-                                    "technicians"
-                            );
+            StringBuilder json = new StringBuilder("[");
 
-            field.setAccessible(true);
-
-            Technician[] technicians =
-                    (Technician[]) field.get(system);
-
-            StringBuilder json =
-                    new StringBuilder("[");
-
-            for (Technician technician : technicians) {
-
-                if (technician == null) {
-                    break;
-                }
-
-                if (json.length() > 1) {
+            for (int i = 0; i < technicians.size(); i++) {
+                Technician technician = technicians.get(i);
+                if (i > 0) {
                     json.append(",");
                 }
 
                 json.append("{");
-
-                json.append(
-                        "\"id\":"
-                                + technician.getTechnicianId()
-                                + ","
-                );
-
-                json.append(
-                        "\"name\":\""
-                                + escape(
-                                    technician.getName()
-                                )
-                                + "\","
-                );
-
-                json.append(
-                        "\"specialization\":\""
-                                + escape(
-                                    technician
-                                        .getSpecialization()
-                                )
-                                + "\","
-                );
-
-                json.append(
-                        "\"available\":"
-                                + technician.isAvailable()
-                );
-
+                json.append("\"id\":").append(technician.getTechnicianId()).append(",");
+                json.append("\"name\":\"").append(escape(technician.getName())).append("\",");
+                json.append("\"specialization\":\"").append(escape(technician.getSpecialization())).append("\",");
+                json.append("\"available\":").append(technician.isAvailable());
                 json.append("}");
             }
 
@@ -489,8 +473,13 @@ public class PowerTrackServer {
                     json.toString()
             );
 
+        } catch (SQLException e) {
+            sendError(
+                    exchange,
+                    503,
+                    "Database connection unavailable: " + DatabaseConnection.sanitizeErrorMessage(e.getMessage())
+            );
         } catch (Exception e) {
-
             sendError(
                     exchange,
                     500,
@@ -580,40 +569,36 @@ public class PowerTrackServer {
     ) throws IOException {
 
         try {
+            List<Outage> outages = system.getOutageDAO().getAllOutages();
 
-            Field field =
-                    ElectricitySystem.class
-                            .getDeclaredField(
-                                    "outages"
-                            );
-
-            field.setAccessible(true);
-
-            Outage[] outages =
-                    (Outage[]) field.get(system);
-
-            StringBuilder json =
-                    new StringBuilder("[");
+            StringBuilder json = new StringBuilder("[");
+            boolean first = true;
 
             for (Outage outage : outages) {
-
                 if (outage == null) {
-                    break;
+                    continue;
                 }
 
                 if (
                         !includeRestored
                         &&
-                        outage.getStatus()
-                                .equals("RESTORED")
+                        "RESTORED".equalsIgnoreCase(outage.getStatus())
                 ) {
-
                     continue;
                 }
 
-                if (json.length() > 1) {
+                if (
+                        includeRestored
+                        &&
+                        !"RESTORED".equalsIgnoreCase(outage.getStatus())
+                ) {
+                    continue;
+                }
+
+                if (!first) {
                     json.append(",");
                 }
+                first = false;
 
                 json.append(
                         outageToJson(outage)
@@ -628,8 +613,13 @@ public class PowerTrackServer {
                     json.toString()
             );
 
+        } catch (SQLException e) {
+            sendError(
+                    exchange,
+                    503,
+                    "Database connection unavailable: " + DatabaseConnection.sanitizeErrorMessage(e.getMessage())
+            );
         } catch (Exception e) {
-
             sendError(
                     exchange,
                     500,
@@ -668,6 +658,14 @@ public class PowerTrackServer {
         }
 
         try {
+            if (!DatabaseConnection.testConnection()) {
+                sendError(
+                        exchange,
+                        503,
+                        "Database connection unavailable. Cannot simulate fault without Supabase."
+                );
+                return;
+            }
 
             String body =
                     readBody(exchange);
@@ -714,7 +712,7 @@ public class PowerTrackServer {
                         200,
                         "{"
                         + "\"success\":true,"
-                        + "\"message\":\"Fault simulated successfully\","
+                        + "\"message\":\"Fault simulated successfully on " + escape(component) + "\","
                         + "\"outage\":"
                         + outageToJson(outage)
                         + "}"
@@ -727,11 +725,17 @@ public class PowerTrackServer {
                         400,
                         "{"
                         + "\"success\":false,"
-                        + "\"message\":\"Unable to create outage\""
+                        + "\"message\":\"Failed to simulate fault for component: " + escape(component) + ". Please choose an eligible feeder (FD-...) or transformer (DT-...)\""
                         + "}"
                 );
             }
 
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("Database error")) {
+                sendError(exchange, 503, e.getMessage());
+            } else {
+                sendError(exchange, 500, e.getMessage());
+            }
         } catch (Exception e) {
 
             sendError(
@@ -772,20 +776,42 @@ public class PowerTrackServer {
         }
 
         try {
+            if (!DatabaseConnection.testConnection()) {
+                sendError(
+                        exchange,
+                        503,
+                        "Database connection unavailable. Cannot process outage without Supabase."
+                );
+                return;
+            }
+
+            if (system.getOutageQueue().isEmpty()) {
+
+                sendJson(
+                        exchange,
+                        400,
+                        "{"
+                        + "\"success\":false,"
+                        + "\"message\":\"No active outages are waiting in the queue.\""
+                        + "}"
+                );
+
+                return;
+            }
 
             system.processNextOutage();
 
             Outage current =
                     getCurrentOutage();
 
-            if (current != null) {
+            if (current != null && "IN PROGRESS".equals(current.getStatus())) {
 
                 sendJson(
                         exchange,
                         200,
                         "{"
                         + "\"success\":true,"
-                        + "\"message\":\"Outage assigned to technician\","
+                        + "\"message\":\"Outage OUT-" + current.getOutageId() + " assigned to technician " + escape(current.getAssignedTechnician()) + "\","
                         + "\"outage\":"
                         + outageToJson(current)
                         + "}"
@@ -798,11 +824,17 @@ public class PowerTrackServer {
                         400,
                         "{"
                         + "\"success\":false,"
-                        + "\"message\":\"No outage could be processed\""
+                        + "\"message\":\"No field technician is currently available in this zone. Outage retained in queue.\""
                         + "}"
                 );
             }
 
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("Database error")) {
+                sendError(exchange, 503, e.getMessage());
+            } else {
+                sendError(exchange, 500, e.getMessage());
+            }
         } catch (Exception e) {
 
             sendError(
@@ -843,6 +875,14 @@ public class PowerTrackServer {
         }
 
         try {
+            if (!DatabaseConnection.testConnection()) {
+                sendError(
+                        exchange,
+                        503,
+                        "Database connection unavailable. Cannot restore outage without Supabase."
+                );
+                return;
+            }
 
             String body =
                     readBody(exchange);
@@ -885,7 +925,22 @@ public class PowerTrackServer {
                 return;
             }
 
-            system.restoreOutage(outageId);
+            if (!"IN PROGRESS".equals(outage.getStatus())) {
+
+                sendJson(
+                        exchange,
+                        400,
+                        "{"
+                        + "\"success\":false,"
+                        + "\"message\":\"Outage OUT-" + outageId + " cannot be restored. Outage must be IN PROGRESS before restoration (Current status: " + escape(outage.getStatus()) + ").\""
+                        + "}"
+                );
+
+                return;
+            }
+
+            String restorationDetails = getJsonString(body, "restorationDetails");
+            system.restoreOutage(outageId, restorationDetails);
 
             sendJson(
                     exchange,
@@ -906,6 +961,12 @@ public class PowerTrackServer {
                     "Invalid outage ID"
             );
 
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("Database error")) {
+                sendError(exchange, 503, e.getMessage());
+            } else {
+                sendError(exchange, 500, e.getMessage());
+            }
         } catch (Exception e) {
 
             sendError(
@@ -913,6 +974,170 @@ public class PowerTrackServer {
                     500,
                     e.getMessage()
             );
+        }
+    }
+
+
+    // =========================================================
+    // ASSIGN OUTAGE TO SPECIFIC TECHNICIAN
+    // =========================================================
+
+    private static void handleAssign(
+            HttpExchange exchange
+    ) throws IOException {
+
+        if (handleOptions(exchange)) {
+            return;
+        }
+
+        addCorsHeaders(exchange);
+
+        if (
+                !exchange.getRequestMethod()
+                        .equalsIgnoreCase("POST")
+        ) {
+            sendError(exchange, 405, "Use POST");
+            return;
+        }
+
+        try {
+            if (!DatabaseConnection.testConnection()) {
+                sendError(exchange, 503, "Database connection unavailable.");
+                return;
+            }
+
+            String body = readBody(exchange);
+            String outageIdStr = getJsonString(body, "outageId");
+            String techIdStr = getJsonString(body, "technicianId");
+
+            if (outageIdStr == null || outageIdStr.isEmpty() || techIdStr == null || techIdStr.isEmpty()) {
+                sendError(exchange, 400, "outageId and technicianId are required");
+                return;
+            }
+
+            int outageId = Integer.parseInt(outageIdStr.replace("OUT-", "").trim());
+            int technicianId = Integer.parseInt(techIdStr.replace("T", "").trim());
+
+            Outage updated = system.assignTechnicianToOutage(outageId, technicianId);
+
+            if (updated == null) {
+                sendError(exchange, 404, "Outage or Technician not found");
+                return;
+            }
+
+            sendJson(
+                    exchange,
+                    200,
+                    "{"
+                    + "\"success\":true,"
+                    + "\"message\":\"Outage OUT-" + outageId + " assigned to technician " + escape(updated.getAssignedTechnician()) + "\","
+                    + "\"outage\":"
+                    + outageToJson(updated)
+                    + "}"
+            );
+
+        } catch (NumberFormatException e) {
+            sendError(exchange, 400, "Invalid numeric format for Outage or Technician ID");
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("Database error")) {
+                sendError(exchange, 503, e.getMessage());
+            } else {
+                sendError(exchange, 500, e.getMessage());
+            }
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
+        }
+    }
+
+
+    // =========================================================
+    // UPDATE OUTAGE WORK STATUS
+    // =========================================================
+
+    private static void handleUpdateStatus(
+            HttpExchange exchange
+    ) throws IOException {
+
+        if (handleOptions(exchange)) {
+            return;
+        }
+
+        addCorsHeaders(exchange);
+
+        if (
+                !exchange.getRequestMethod()
+                        .equalsIgnoreCase("POST")
+        ) {
+            sendError(exchange, 405, "Use POST");
+            return;
+        }
+
+        try {
+            if (!DatabaseConnection.testConnection()) {
+                sendError(exchange, 503, "Database connection unavailable.");
+                return;
+            }
+
+            String body = readBody(exchange);
+            String outageIdStr = getJsonString(body, "outageId");
+            String targetStatus = getJsonString(body, "status");
+            String techIdStr = getJsonString(body, "technicianId");
+            String details = getJsonString(body, "details");
+
+            if (outageIdStr == null || outageIdStr.isEmpty() || targetStatus == null || targetStatus.isEmpty()) {
+                sendError(exchange, 400, "outageId and status are required");
+                return;
+            }
+
+            int outageId = Integer.parseInt(outageIdStr.replace("OUT-", "").trim());
+            Outage outage = findOutage(outageId);
+
+            if (outage == null) {
+                sendError(exchange, 404, "Outage not found");
+                return;
+            }
+
+            targetStatus = targetStatus.toUpperCase().trim();
+
+            if ("RESTORED".equals(targetStatus)) {
+                if (!"IN PROGRESS".equals(outage.getStatus())) {
+                    sendJson(exchange, 400, "{\"success\":false,\"message\":\"Outage must be IN PROGRESS before marking as RESTORED.\"}");
+                    return;
+                }
+                system.restoreOutage(outageId, details);
+                sendJson(exchange, 200, "{"
+                        + "\"success\":true,"
+                        + "\"message\":\"Outage OUT-" + outageId + " marked as RESTORED and power restored.\","
+                        + "\"outage\":" + outageToJson(outage)
+                        + "}");
+                return;
+            } else if ("IN PROGRESS".equals(targetStatus) || "ASSIGNED".equals(targetStatus)) {
+                if (techIdStr != null && !techIdStr.trim().isEmpty()) {
+                    int techId = Integer.parseInt(techIdStr.replace("T", "").trim());
+                    system.assignTechnicianToOutage(outageId, techId);
+                } else if (!"IN PROGRESS".equals(outage.getStatus())) {
+                    system.processNextOutage();
+                }
+                sendJson(exchange, 200, "{"
+                        + "\"success\":true,"
+                        + "\"message\":\"Outage OUT-" + outageId + " status updated to " + escape(targetStatus) + "\","
+                        + "\"outage\":" + outageToJson(outage)
+                        + "}");
+                return;
+            } else {
+                sendError(exchange, 400, "Unsupported status: " + targetStatus);
+            }
+
+        } catch (NumberFormatException e) {
+            sendError(exchange, 400, "Invalid numeric format");
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("Database error")) {
+                sendError(exchange, 503, e.getMessage());
+            } else {
+                sendError(exchange, 500, e.getMessage());
+            }
+        } catch (Exception e) {
+            sendError(exchange, 500, e.getMessage());
         }
     }
 
@@ -946,115 +1171,20 @@ public class PowerTrackServer {
         }
 
         try {
-
-            Consumer[] consumers =
-                    getConsumers();
-
-            NetworkNode[] nodes =
-                    getNetworkNodes();
-
-            Technician[] technicians =
-                    getTechnicians();
-
-            Outage[] outages =
-                    getOutages();
-
-            int totalConsumers = 0;
-            int powerAvailable = 0;
-            int activeOutages = 0;
-            int restoredOutages = 0;
-            int activeNodes = 0;
-            int availableTechnicians = 0;
-
-            for (Consumer consumer : consumers) {
-
-                if (consumer == null) {
-                    break;
-                }
-
-                totalConsumers++;
-
-                if (
-                        consumer.isPowerAvailable()
-                ) {
-
-                    powerAvailable++;
-                }
-            }
-
-            for (NetworkNode node : nodes) {
-
-                if (node == null) {
-                    break;
-                }
-
-                if (node.isActive()) {
-                    activeNodes++;
-                }
-            }
-
-            for (Technician technician : technicians) {
-
-                if (technician == null) {
-                    break;
-                }
-
-                if (technician.isAvailable()) {
-                    availableTechnicians++;
-                }
-            }
-
-            for (Outage outage : outages) {
-
-                if (outage == null) {
-                    break;
-                }
-
-                if (
-                        outage.getStatus()
-                                .equals("RESTORED")
-                ) {
-
-                    restoredOutages++;
-
-                } else {
-
-                    activeOutages++;
-                }
-            }
-
-            String json =
-                    "{"
-                    + "\"totalConsumers\":"
-                    + totalConsumers
-                    + ","
-                    + "\"powerAvailable\":"
-                    + powerAvailable
-                    + ","
-                    + "\"powerOutage\":"
-                    + (totalConsumers - powerAvailable)
-                    + ","
-                    + "\"activeOutages\":"
-                    + activeOutages
-                    + ","
-                    + "\"restoredOutages\":"
-                    + restoredOutages
-                    + ","
-                    + "\"activeNodes\":"
-                    + activeNodes
-                    + ","
-                    + "\"availableTechnicians\":"
-                    + availableTechnicians
-                    + "}";
-
+            dao.StatsDAO.SystemStats dbStats = system.getStatsDAO().getSystemStats();
             sendJson(
                     exchange,
                     200,
-                    json
+                    dbStats.toJson()
             );
 
+        } catch (SQLException e) {
+            sendError(
+                    exchange,
+                    503,
+                    "Database connection unavailable: " + DatabaseConnection.sanitizeErrorMessage(e.getMessage())
+            );
         } catch (Exception e) {
-
             sendError(
                     exchange,
                     500,
@@ -1065,8 +1195,75 @@ public class PowerTrackServer {
 
 
     // =========================================================
+    // HEALTH CHECK
+    // =========================================================
+
+    private static void handleHealth(
+            HttpExchange exchange
+    ) throws IOException {
+
+        if (handleOptions(exchange)) {
+            return;
+        }
+
+        addCorsHeaders(exchange);
+
+        if (
+                !exchange.getRequestMethod()
+                        .equalsIgnoreCase("GET")
+        ) {
+
+            sendError(
+                    exchange,
+                    405,
+                    "Method not allowed"
+            );
+
+            return;
+        }
+
+        boolean dbConnected = DatabaseConnection.testConnection();
+
+        if (dbConnected) {
+            sendJson(
+                    exchange,
+                    200,
+                    "{"
+                    + "\"status\":\"UP\","
+                    + "\"service\":\"PowerTrack\","
+                    + "\"database\":\"CONNECTED\""
+                    + "}"
+            );
+        } else {
+            sendJson(
+                    exchange,
+                    503,
+                    "{"
+                    + "\"status\":\"DOWN\","
+                    + "\"service\":\"PowerTrack\","
+                    + "\"database\":\"DISCONNECTED\","
+                    + "\"error\":\"Database connection unavailable. PowerTrack requires an active Supabase connection.\""
+                    + "}"
+            );
+        }
+    }
+
+
+    // =========================================================
     // FRONTEND FILE SERVER
     // =========================================================
+
+    private static Path getFrontendRoot() {
+        Path p = Paths.get("../frontend").toAbsolutePath().normalize();
+        if (Files.exists(p) && Files.isDirectory(p)) {
+            return p;
+        }
+        p = Paths.get("frontend").toAbsolutePath().normalize();
+        if (Files.exists(p) && Files.isDirectory(p)) {
+            return p;
+        }
+        return Paths.get(FRONTEND_PATH).toAbsolutePath().normalize();
+    }
 
     private static void handleFrontend(
             HttpExchange exchange
@@ -1094,10 +1291,7 @@ public class PowerTrackServer {
         }
 
         Path frontendRoot =
-                Paths.get(
-                        FRONTEND_PATH
-                ).toAbsolutePath()
-                .normalize();
+                getFrontendRoot();
 
         Path requestedFile =
                 frontendRoot
@@ -1168,127 +1362,35 @@ public class PowerTrackServer {
 
 
     // =========================================================
-    // GETTERS USING EXISTING ELECTRICITY SYSTEM
+    // OUTAGE HELPERS VIA SUPABASE DAO
     // =========================================================
 
-    private static Consumer[] getConsumers()
-            throws Exception {
-
-        Field field =
-                ElectricitySystem.class
-                        .getDeclaredField(
-                                "consumers"
-                        );
-
-        field.setAccessible(true);
-
-        return (Consumer[]) field.get(system);
+    private static int getOutageCount() throws Exception {
+        return system.getOutageDAO().getAllOutages().size();
     }
 
-
-    private static NetworkNode[] getNetworkNodes()
-            throws Exception {
-
-        Field field =
-                ElectricitySystem.class
-                        .getDeclaredField(
-                                "networkNodes"
-                        );
-
-        field.setAccessible(true);
-
-        return (NetworkNode[]) field.get(system);
-    }
-
-
-    private static Technician[] getTechnicians()
-            throws Exception {
-
-        Field field =
-                ElectricitySystem.class
-                        .getDeclaredField(
-                                "technicians"
-                        );
-
-        field.setAccessible(true);
-
-        return (Technician[]) field.get(system);
-    }
-
-
-    private static Outage[] getOutages()
-            throws Exception {
-
-        Field field =
-                ElectricitySystem.class
-                        .getDeclaredField(
-                                "outages"
-                        );
-
-        field.setAccessible(true);
-
-        return (Outage[]) field.get(system);
-    }
-
-
-    private static int getOutageCount()
-            throws Exception {
-
-        Field field =
-                ElectricitySystem.class
-                        .getDeclaredField(
-                                "outageCount"
-                        );
-
-        field.setAccessible(true);
-
-        return field.getInt(system);
-    }
-
-
-    private static Outage getLastOutage()
-            throws Exception {
-
-        Outage[] outages =
-                getOutages();
-
-        int count =
-                getOutageCount();
-
-        if (count == 0) {
+    private static Outage getLastOutage() throws Exception {
+        List<Outage> list = system.getOutageDAO().getAllOutages();
+        if (list.isEmpty()) {
             return null;
         }
-
-        return outages[count - 1];
+        return list.get(list.size() - 1);
     }
 
-
-    private static Outage getCurrentOutage()
-            throws Exception {
-
-        Field field =
-                ElectricitySystem.class
-                        .getDeclaredField(
-                                "currentOutage"
-                        );
-
-        field.setAccessible(true);
-
-        return (Outage) field.get(system);
+    private static Outage getCurrentOutage() {
+        return system.getCurrentOutage();
     }
-
 
     private static Outage findOutage(
             int outageId
     ) throws Exception {
 
-        Outage[] outages =
-                getOutages();
+        List<Outage> outages = system.getOutageDAO().getAllOutages();
 
         for (Outage outage : outages) {
 
             if (outage == null) {
-                break;
+                continue;
             }
 
             if (
@@ -1337,6 +1439,35 @@ public class PowerTrackServer {
 
         areas.append("]");
 
+        StringBuilder crit =
+                new StringBuilder("[");
+
+        ArrayList<String> criticalFacilities =
+                outage.getCriticalFacilities();
+
+        if (criticalFacilities != null) {
+            for (int i = 0;
+                 i < criticalFacilities.size();
+                 i++) {
+
+                if (i > 0) {
+                    crit.append(",");
+                }
+
+                crit.append(
+                        "\""
+                        + escape(
+                            criticalFacilities.get(i)
+                        )
+                        + "\""
+                );
+            }
+        }
+
+        crit.append("]");
+
+        int queuePosition = system.getQueuePosition(outage);
+
         return "{"
                 + "\"id\":\"OUT-"
                 + outage.getOutageId()
@@ -1378,6 +1509,24 @@ public class PowerTrackServer {
                 )
                 + "\","
 
+                + "\"criticalFacilities\":"
+                + crit
+                + ","
+
+                + "\"priorityReason\":\""
+                + escape(
+                    outage.getPriorityReason()
+                )
+                + "\","
+
+                + "\"queuePosition\":"
+                + queuePosition
+                + ","
+
+                + "\"queueSequence\":"
+                + outage.getQueueSequence()
+                + ","
+
                 + "\"status\":\""
                 + escape(
                     outage.getStatus()
@@ -1388,6 +1537,18 @@ public class PowerTrackServer {
                 + escape(
                     outage.getAssignedTechnician()
                 )
+                + "\","
+
+                + "\"assignedTechnicianId\":"
+                + (outage.getAssignedTechnicianId() != null ? outage.getAssignedTechnicianId() : "null")
+                + ","
+
+                + "\"reportedAt\":\""
+                + (outage.getReportedAt() != null ? escape(outage.getReportedAt().toString()) : "")
+                + "\","
+
+                + "\"restoredAt\":\""
+                + (outage.getRestoredAt() != null ? escape(outage.getRestoredAt().toString()) : "")
                 + "\""
 
                 + "}";

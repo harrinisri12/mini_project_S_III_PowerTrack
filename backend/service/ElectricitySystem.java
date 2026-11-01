@@ -1,9 +1,20 @@
 package service;
 
+import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Scanner;
 
+import database.DatabaseConnection;
+import dao.ConsumerDAO;
+import dao.NetworkDAO;
+import dao.TechnicianDAO;
+import dao.OutageDAO;
+import dao.StatsDAO;
+
 import model.Consumer;
+import model.NetworkConnection;
 import model.NetworkNode;
 import model.Outage;
 import model.Technician;
@@ -11,6 +22,29 @@ import model.Technician;
 import datastructure.Queue;
 import datastructure.Graph;
 
+/**
+ * ==============================================================================
+ * PowerTrack: Core Electricity System Service & Coordinator
+ * ==============================================================================
+ * Essential Data Structures Used:
+ *   1. Queue (datastructure.Queue<Outage>):
+ *      - Priority Queue for managing active grid outage tickets.
+ *      - Ensures outages affecting Hospitals and Emergency services are dequeued first.
+ *   2. Graph (datastructure.Graph):
+ *      - Custom Adjacency List representing regional grid assets (substations, feeders, lines).
+ *      - Provides BFS and DFS algorithms for downstream fault impact tracing.
+ *   3. ArrayList (java.util.ArrayList):
+ *      - Used throughout the system for dynamic collections (affected locality areas,
+ *        critical facility lists, queued outage items, and database records).
+ *   4. HashMap (java.util.HashMap):
+ *      - Used for O(1) asset lookups, connection mapping, and neighbor indexing.
+ *
+ * Outage Priority Logic:
+ *   - HIGH: Essential facilities affected (Hospitals, Emergency Healthcare).
+ *   - MEDIUM: Commercial, industrial, or educational institutions affected.
+ *   - LOW: Standard residential consumers.
+ * ==============================================================================
+ */
 public class ElectricitySystem {
 
     private Consumer[] consumers;
@@ -18,6 +52,7 @@ public class ElectricitySystem {
     private Outage[] outages;
     private Technician[] technicians;
 
+    // Custom Data Structures: Priority Queue and Grid Topology Graph
     private Queue<Outage> outageQueue;
     private Graph electricityGraph;
 
@@ -27,9 +62,18 @@ public class ElectricitySystem {
     private int technicianCount;
 
     private int nextOutageId;
+    private int nextQueueSequence;
 
     // Currently processed outage
     private Outage currentOutage;
+
+    // Database DAO & connectivity
+    private final ConsumerDAO consumerDAO = new ConsumerDAO();
+    private final NetworkDAO networkDAO = new NetworkDAO();
+    private final TechnicianDAO technicianDAO = new TechnicianDAO();
+    private final OutageDAO outageDAO = new OutageDAO();
+    private final StatsDAO statsDAO = new StatsDAO();
+    private boolean databaseConnected = false;
 
     // =========================================
     // CONSTRUCTOR
@@ -51,300 +95,189 @@ public class ElectricitySystem {
         technicianCount = 0;
 
         nextOutageId = 1001;
+        nextQueueSequence = 1;
 
         currentOutage = null;
 
-        initializeNetwork();
-        initializeConsumers();
-        initializeTechnicians();
-        initializeHistory();
+        initializeSystem();
     }
 
     // =========================================
-    // INITIAL NETWORK - TAMIL NADU REGIONAL GRID
-    // (Erode, Perundurai, Chennimalai, Tiruppur, Avinashi)
+    // INITIALIZATION & DATABASE SYNC
     // =========================================
 
-    private void initializeNetwork() {
+    private void initializeSystem() {
+        if (!DatabaseConnection.isConfigured()) {
+            String err = "[PowerTrack Fatal Error] Supabase database credentials are not configured.\n"
+                    + "Environment variables SUPABASE_DB_URL, SUPABASE_DB_USER, and SUPABASE_DB_PASSWORD are required.\n"
+                    + "In-memory offline fallback is completely disabled. Startup halted.";
+            System.err.println(err);
+            throw new IllegalStateException(err);
+        }
 
-        // --- SUBSTATIONS (230kV / 110kV Transmission Nodes) ---
-        addNetworkNode(new NetworkNode("SS-ERD-01", "Erode Central 230kV Substation", "SUBSTATION"));
-        addNetworkNode(new NetworkNode("SS-PER-02", "Perundurai 110kV Substation", "SUBSTATION"));
-        addNetworkNode(new NetworkNode("SS-TPR-03", "Tiruppur North 110kV Substation", "SUBSTATION"));
+        if (!DatabaseConnection.testConnection()) {
+            String err = "[PowerTrack Fatal Error] Cannot connect to Supabase PostgreSQL database.\n"
+                    + "Please verify database status, network connectivity, and credentials.\n"
+                    + "In-memory offline fallback is completely disabled. Startup halted.";
+            System.err.println(err);
+            throw new IllegalStateException(err);
+        }
 
-        // --- FEEDERS (11kV / 22kV High-Tension Distribution Feeders) ---
-        addNetworkNode(new NetworkNode("FD-ERD-01", "Erode North Feeder", "FEEDER"));
-        addNetworkNode(new NetworkNode("FD-PER-02", "SIPCOT Industrial Feeder", "FEEDER"));
-        addNetworkNode(new NetworkNode("FD-CHN-03", "Chennimalai Feeder", "FEEDER"));
-        addNetworkNode(new NetworkNode("FD-AVI-04", "Avinashi Feeder", "FEEDER"));
-        addNetworkNode(new NetworkNode("FD-TPR-05", "Rayapuram Feeder", "FEEDER"));
+        try {
+            System.out.println();
+            System.out.println("[PowerTrack] Connected to Supabase PostgreSQL database.");
+            loadFromDatabase();
+            databaseConnected = true;
+            System.out.println("[PowerTrack] Database synchronization complete.");
+        } catch (Exception e) {
+            String err = "[PowerTrack Fatal Error] Failed to load data from Supabase: "
+                    + DatabaseConnection.sanitizeErrorMessage(e.getMessage());
+            System.err.println(err);
+            throw new IllegalStateException(err, e);
+        }
+    }
 
-        // --- DISTRIBUTION TRANSFORMERS (11kV / 415V Step-Down Transformers) ---
-        addNetworkNode(new NetworkNode("DT-ERD-101", "Kumalan Kuttai Transformer", "TRANSFORMER"));
-        addNetworkNode(new NetworkNode("DT-PER-102", "SIPCOT Phase-I Transformer", "TRANSFORMER"));
-        addNetworkNode(new NetworkNode("DT-CHN-103", "Chennimalai Town Transformer", "TRANSFORMER"));
-        addNetworkNode(new NetworkNode("DT-AVI-104", "Avinashi Main Transformer", "TRANSFORMER"));
-        addNetworkNode(new NetworkNode("DT-TPR-105", "Rayapuram Textile Transformer", "TRANSFORMER"));
+    private void loadFromDatabase() throws SQLException {
+        // Reset in-memory structures to mirror Supabase database directly
+        consumerCount = 0;
+        networkNodeCount = 0;
+        outageCount = 0;
+        technicianCount = 0;
+        outageQueue = new Queue<>();
+        electricityGraph = new Graph();
 
-        // --- CONSUMER LOCALITY AREAS ---
-        addNetworkNode(new NetworkNode("AREA-ERD-PR", "Perundurai Road Locality", "AREA"));
-        addNetworkNode(new NetworkNode("AREA-ERD-SN", "Sampath Nagar Locality", "AREA"));
-        addNetworkNode(new NetworkNode("AREA-PER-SIP", "SIPCOT Industrial Zone", "AREA"));
-        addNetworkNode(new NetworkNode("AREA-CHN-TWN", "Chennimalai Town Area", "AREA"));
-        addNetworkNode(new NetworkNode("AREA-AVI-BYP", "Avinashi Bypass Area", "AREA"));
-        addNetworkNode(new NetworkNode("AREA-TPR-RAY", "Rayapuram Textile Cluster", "AREA"));
+        // 1. Network nodes from Supabase
+        List<NetworkNode> dbNodes = networkDAO.getAllNodes();
+        for (NetworkNode node : dbNodes) {
+            addNetworkNode(node);
+        }
 
-        // =========================================
-        // GRAPH CONNECTIONS (HIERARCHY & INTER-LINKS)
-        // =========================================
+        // 2. Network connections into Graph from Supabase
+        List<NetworkConnection> dbConns = networkDAO.getAllConnections();
+        for (NetworkConnection conn : dbConns) {
+            electricityGraph.addEdge(conn.getSourceNodeId(), conn.getDestinationNodeId());
+        }
 
-        // Substation Transmission Inter-ties
-        electricityGraph.addEdge("SS-ERD-01", "SS-PER-02");
-        electricityGraph.addEdge("SS-PER-02", "SS-TPR-03");
+        // 3. Consumers from Supabase
+        List<Consumer> dbConsumers = consumerDAO.getAllConsumers();
+        for (Consumer c : dbConsumers) {
+            addConsumer(c);
+        }
 
-        // Substation to Feeder connections
-        electricityGraph.addEdge("SS-ERD-01", "FD-ERD-01");
-        electricityGraph.addEdge("SS-PER-02", "FD-PER-02");
-        electricityGraph.addEdge("SS-PER-02", "FD-CHN-03");
-        electricityGraph.addEdge("SS-TPR-03", "FD-AVI-04");
-        electricityGraph.addEdge("SS-TPR-03", "FD-TPR-05");
+        // 4. Technicians from Supabase
+        List<Technician> dbTechs = technicianDAO.getAllTechnicians();
+        for (Technician t : dbTechs) {
+            addTechnician(t);
+        }
 
-        // Feeder to Distribution Transformer connections
-        electricityGraph.addEdge("FD-ERD-01", "DT-ERD-101");
-        electricityGraph.addEdge("FD-PER-02", "DT-PER-102");
-        electricityGraph.addEdge("FD-CHN-03", "DT-CHN-103");
-        electricityGraph.addEdge("FD-AVI-04", "DT-AVI-104");
-        electricityGraph.addEdge("FD-TPR-05", "DT-TPR-105");
+        // 5. Outages (both active queued outages and historical completed ones) from Supabase
+        List<Outage> dbOutages = outageDAO.getAllOutages();
+        int maxSeq = 0;
+        for (Outage o : dbOutages) {
+            addOutage(o);
+            if (o.getQueueSequence() > maxSeq) {
+                maxSeq = o.getQueueSequence();
+            }
 
-        // Transformer to Consumer Area distribution feeds
-        electricityGraph.addEdge("DT-ERD-101", "AREA-ERD-PR");
-        electricityGraph.addEdge("DT-ERD-101", "AREA-ERD-SN");
-        electricityGraph.addEdge("DT-PER-102", "AREA-PER-SIP");
-        electricityGraph.addEdge("DT-CHN-103", "AREA-CHN-TWN");
-        electricityGraph.addEdge("DT-AVI-104", "AREA-AVI-BYP");
-        electricityGraph.addEdge("DT-TPR-105", "AREA-TPR-RAY");
+            if ("ACTIVE".equalsIgnoreCase(o.getStatus())) {
+                outageQueue.enqueue(o);
+            } else if ("IN PROGRESS".equalsIgnoreCase(o.getStatus())) {
+                this.currentOutage = o;
+            }
+        }
+
+        this.nextOutageId = outageDAO.getNextOutageId();
+        this.nextQueueSequence = maxSeq + 1;
+
+        System.out.println("[PowerTrack] Live database records loaded from Supabase:");
+        System.out.println("  - Nodes: " + networkNodeCount);
+        System.out.println("  - Connections: " + dbConns.size());
+        System.out.println("  - Consumers: " + consumerCount);
+        System.out.println("  - Technicians: " + technicianCount);
+        System.out.println("  - Outages: " + outageCount + " (" + outageQueue.size() + " active in queue)");
     }
 
     // =========================================
-    // INITIAL CONSUMERS - REALISTIC TN CONSUMERS
-    // =========================================
-
-    private void initializeConsumers() {
-
-        // Erode - Perundurai Road & Sampath Nagar
-        addConsumer(new Consumer(1001, "S. Karthikeyan (Domestic, 3.2 kW)", "AREA-ERD-PR"));
-        addConsumer(new Consumer(1002, "Dr. M. Soundararajan - Erode City Clinic", "AREA-ERD-PR"));
-        addConsumer(new Consumer(1003, "V. Meenakshi Sundaram (Commercial Complex)", "AREA-ERD-SN"));
-        addConsumer(new Consumer(1004, "Sampath Nagar Community Health Center", "AREA-ERD-SN"));
-        addConsumer(new Consumer(1005, "K. Rangarajan (Domestic, 2.5 kW)", "AREA-ERD-SN"));
-
-        // Perundurai - SIPCOT Industrial Zone
-        addConsumer(new Consumer(1006, "Sakthi Murugan Spinning Mills Ltd.", "AREA-PER-SIP"));
-        addConsumer(new Consumer(1007, "Perundurai Tanneries Effluent Plant", "AREA-PER-SIP"));
-        addConsumer(new Consumer(1008, "G. Thangavel - Sri Krishna Textiles", "AREA-PER-SIP"));
-        addConsumer(new Consumer(1009, "P. Dhanalakshmi (SIPCOT Staff Quarters)", "AREA-PER-SIP"));
-
-        // Chennimalai Town Area
-        addConsumer(new Consumer(1010, "Chennimalai Handloom Weavers Co-op Society", "AREA-CHN-TWN"));
-        addConsumer(new Consumer(1011, "Murugan Temple Bazaar Commercial Complex", "AREA-CHN-TWN"));
-        addConsumer(new Consumer(1012, "N. Balasubramanian (Domestic, 4.0 kW)", "AREA-CHN-TWN"));
-        addConsumer(new Consumer(1013, "Chennimalai Govt Higher Secondary School", "AREA-CHN-TWN"));
-
-        // Avinashi Bypass Area
-        addConsumer(new Consumer(1014, "Avinashi Cold Storage & Agro Logistics", "AREA-AVI-BYP"));
-        addConsumer(new Consumer(1015, "R. Selvakumar - Sri Amman Auto Works", "AREA-AVI-BYP"));
-        addConsumer(new Consumer(1016, "Avinashi Primary Health Centre", "AREA-AVI-BYP"));
-        addConsumer(new Consumer(1017, "T. Muthusamy (Domestic, 3.0 kW)", "AREA-AVI-BYP"));
-
-        // Tiruppur - Rayapuram Textile Cluster
-        addConsumer(new Consumer(1018, "Tiruppur Export Knitwear Unit No. 4", "AREA-TPR-RAY"));
-        addConsumer(new Consumer(1019, "Rayapuram Dyeing & Processing Works", "AREA-TPR-RAY"));
-        addConsumer(new Consumer(1020, "K. Jayanthi - Jayam Garments", "AREA-TPR-RAY"));
-        addConsumer(new Consumer(1021, "Tiruppur Govt Hospital Oxygen Plant", "AREA-TPR-RAY"));
-        addConsumer(new Consumer(1022, "A. Palanisamy (Domestic, 2.0 kW)", "AREA-TPR-RAY"));
-    }
-
-    // =========================================
-    // INITIAL TECHNICIANS - FIELD WORKFORCE
-    // =========================================
-
-    private void initializeTechnicians() {
-
-        addTechnician(new Technician(201, "R. Suresh", "Electrical Lines"));
-        addTechnician(new Technician(202, "M. Senthil Kumar", "Transformers"));
-        addTechnician(new Technician(203, "K. Mani", "Distribution"));
-        addTechnician(new Technician(204, "P. Gunasekaran", "Transformers"));
-        addTechnician(new Technician(205, "S. Murugesan", "Electrical Lines"));
-        addTechnician(new Technician(206, "V. Anandhan", "Distribution"));
-    }
-
-    // =========================================
-    // INITIAL HISTORICAL RESTORED OUTAGES
-    // =========================================
-
-    private void initializeHistory() {
-
-        // 1. Erode North Feeder Trip
-        ArrayList<String> areas1 = new ArrayList<>();
-        areas1.add("AREA-ERD-PR");
-        areas1.add("AREA-ERD-SN");
-        Outage h1 = new Outage(
-            nextOutageId++,
-            "FD-ERD-01",
-            "33kV Feeder Tripping via Earth Fault",
-            areas1,
-            5
-        );
-        h1.setPriority("HIGH");
-        h1.setStatus("RESTORED");
-        h1.setAssignedTechnician("R. Suresh");
-        outages[outageCount++] = h1;
-
-        // 2. Chennimalai Transformer Overload
-        ArrayList<String> areas2 = new ArrayList<>();
-        areas2.add("AREA-CHN-TWN");
-        Outage h2 = new Outage(
-            nextOutageId++,
-            "DT-CHN-103",
-            "Distribution Transformer Thermal Overload",
-            areas2,
-            4
-        );
-        h2.setPriority("MEDIUM");
-        h2.setStatus("RESTORED");
-        h2.setAssignedTechnician("P. Gunasekaran");
-        outages[outageCount++] = h2;
-
-        // 3. SIPCOT Phase-I Transformer Flashover
-        ArrayList<String> areas3 = new ArrayList<>();
-        areas3.add("AREA-PER-SIP");
-        Outage h3 = new Outage(
-            nextOutageId++,
-            "DT-PER-102",
-            "HT Bushing Insulator Flashover",
-            areas3,
-            4
-        );
-        h3.setPriority("HIGH");
-        h3.setStatus("RESTORED");
-        h3.setAssignedTechnician("M. Senthil Kumar");
-        outages[outageCount++] = h3;
-
-        // 4. Avinashi Overhead Line Severance
-        ArrayList<String> areas4 = new ArrayList<>();
-        areas4.add("AREA-AVI-BYP");
-        Outage h4 = new Outage(
-            nextOutageId++,
-            "FD-AVI-04",
-            "11kV Overhead Conductor Snap",
-            areas4,
-            4
-        );
-        h4.setPriority("MEDIUM");
-        h4.setStatus("RESTORED");
-        h4.setAssignedTechnician("S. Murugesan");
-        outages[outageCount++] = h4;
-
-        // 5. Rayapuram Textile Transformer Core Saturation
-        ArrayList<String> areas5 = new ArrayList<>();
-        areas5.add("AREA-TPR-RAY");
-        Outage h5 = new Outage(
-            nextOutageId++,
-            "DT-TPR-105",
-            "Transformer Oil Deterioration & Trip",
-            areas5,
-            5
-        );
-        h5.setPriority("CRITICAL");
-        h5.setStatus("RESTORED");
-        h5.setAssignedTechnician("M. Senthil Kumar");
-        outages[outageCount++] = h5;
-    }
-
-    // =========================================
-    // CONSUMERS
+    // STORAGE HELPERS (DYNAMIC SIZING)
     // =========================================
 
     public void addConsumer(Consumer consumer) {
-
         if (consumerCount >= consumers.length) {
-            System.out.println("Consumer storage is full.");
-            return;
+            consumers = Arrays.copyOf(consumers, consumers.length * 2);
         }
-
         consumers[consumerCount] = consumer;
         consumerCount++;
     }
 
-    public void displayConsumers() {
+    public void addNetworkNode(NetworkNode node) {
+        if (networkNodeCount >= networkNodes.length) {
+            networkNodes = Arrays.copyOf(networkNodes, networkNodes.length * 2);
+        }
+        networkNodes[networkNodeCount] = node;
+        networkNodeCount++;
+    }
 
+    public void addTechnician(Technician technician) {
+        if (technicianCount >= technicians.length) {
+            technicians = Arrays.copyOf(technicians, technicians.length * 2);
+        }
+        technicians[technicianCount] = technician;
+        technicianCount++;
+    }
+
+    public void addOutage(Outage outage) {
+        if (outageCount >= outages.length) {
+            outages = Arrays.copyOf(outages, outages.length * 2);
+        }
+        outages[outageCount] = outage;
+        outageCount++;
+    }
+
+    public void displayConsumers() {
         System.out.println();
         System.out.println("========== REGISTERED CONSUMERS (TAMIL NADU GRID) ==========");
-
         if (consumerCount == 0) {
             System.out.println("No consumers found.");
             return;
         }
-
         for (int i = 0; i < consumerCount; i++) {
             consumers[i].display();
         }
     }
 
-    // =========================================
-    // NETWORK
-    // =========================================
-
-    public void addNetworkNode(NetworkNode node) {
-
-        if (networkNodeCount >= networkNodes.length) {
-            System.out.println("Network storage is full.");
-            return;
-        }
-
-        networkNodes[networkNodeCount] = node;
-        networkNodeCount++;
-    }
-
     public void displayNetwork() {
-
         System.out.println();
         System.out.println("========== ELECTRICITY NETWORK (ERODE-TIRUPPUR REGION) ==========");
-
         for (int i = 0; i < networkNodeCount; i++) {
             networkNodes[i].display();
         }
-
         electricityGraph.displayGraph();
     }
 
-    // =========================================
-    // TECHNICIANS
-    // =========================================
-
-    public void addTechnician(Technician technician) {
-
-        if (technicianCount >= technicians.length) {
-            System.out.println("Technician storage is full.");
-            return;
-        }
-
-        technicians[technicianCount] = technician;
-        technicianCount++;
-    }
-
     public void displayTechnicians() {
-
         System.out.println();
         System.out.println("========== FIELD TECHNICIANS ROSTER ==========");
-
         if (technicianCount == 0) {
             System.out.println("No technicians found.");
             return;
         }
-
         for (int i = 0; i < technicianCount; i++) {
             technicians[i].display();
+        }
+    }
+
+    public void displayAvailableComponents() {
+        System.out.println("Available Distribution Components (from Supabase):");
+        boolean found = false;
+        for (int i = 0; i < networkNodeCount; i++) {
+            NetworkNode n = networkNodes[i];
+            if ("FEEDER".equalsIgnoreCase(n.getNodeType()) || "TRANSFORMER".equalsIgnoreCase(n.getNodeType())) {
+                System.out.printf("  %-12s - %s [%s]%n", n.getNodeId(), n.getNodeName(), (n.isActive() ? "OPERATIONAL" : "FAULT / OFFLINE"));
+                found = true;
+            }
+        }
+        if (!found) {
+            System.out.println("  (No distribution feeders or transformers found in network)");
         }
     }
 
@@ -385,7 +318,7 @@ public class ElectricitySystem {
         setNodeStatus(failedComponent, false);
 
         // -----------------------------------------
-        // Determine affected areas
+        // Determine affected areas (using BFS graph algorithm)
         // -----------------------------------------
         ArrayList<String> affectedAreas = findAffectedAreas(failedComponent);
 
@@ -401,9 +334,10 @@ public class ElectricitySystem {
         int affectedConsumerCount = countAffectedConsumers(affectedAreas);
 
         // -----------------------------------------
-        // Determine priority
+        // Determine priority & evaluate critical facilities
         // -----------------------------------------
-        String priority = calculatePriority(affectedConsumerCount);
+        OutagePriorityEvaluation eval = evaluateOutagePriority(affectedAreas, affectedConsumerCount);
+        String priority = eval.getPriority();
 
         // -----------------------------------------
         // Determine fault classification
@@ -424,12 +358,14 @@ public class ElectricitySystem {
         );
 
         outage.setPriority(priority);
+        outage.setCriticalFacilities(eval.getCriticalFacilities());
+        outage.setPriorityReason(eval.getPriorityReason());
+        outage.setQueueSequence(nextQueueSequence++);
 
         // -----------------------------------------
-        // Store outage
+        // Store outage in memory
         // -----------------------------------------
-        outages[outageCount] = outage;
-        outageCount++;
+        addOutage(outage);
         nextOutageId++;
 
         // -----------------------------------------
@@ -438,21 +374,40 @@ public class ElectricitySystem {
         updateConsumerPower(affectedAreas);
 
         // -----------------------------------------
-        // Add to queue
+        // Add to priority queue
         // -----------------------------------------
         outageQueue.enqueue(outage);
 
         // -----------------------------------------
+        // Persist to Supabase Database (Transaction)
+        // -----------------------------------------
+        try {
+            List<Integer> affectedIds = consumerDAO.getConsumerIdsByAreas(affectedAreas, null);
+            outageDAO.insertOutageTransaction(outage, affectedIds);
+        } catch (SQLException e) {
+            String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
+            System.err.println("[PowerTrack Database Error] Failed to persist outage to Supabase: " + sanitized);
+            throw new RuntimeException("Database error persisting outage to Supabase: " + sanitized, e);
+        }
+
+        // -----------------------------------------
         // Display detection result
         // -----------------------------------------
+        int queuePos = outageQueue.getPosition(outage);
+
         System.out.println();
         System.out.println("Affected Areas: " + affectedAreas);
         System.out.println("Affected Consumers: " + affectedConsumerCount);
-        System.out.println("Restoration Priority: " + priority);
-        System.out.println("Registered Outage ID: " + outage.getOutageId());
+        System.out.println("Emergency Priority Level: [" + priority + "]");
+        if (!eval.getCriticalFacilities().isEmpty()) {
+            System.out.println("CRITICAL FACILITIES AFFECTED: " + eval.getCriticalFacilities());
+        }
+        System.out.println("Priority Reason: " + eval.getPriorityReason());
+        System.out.println("Queue Position: #" + (queuePos > 0 ? queuePos : 1) + " (Priority Order)");
+        System.out.println("Registered Outage ID: OUT-" + outage.getOutageId());
         System.out.println("Status: " + outage.getStatus());
         System.out.println();
-        System.out.println("Outage successfully enqueued to restoration queue.");
+        System.out.println("Outage successfully enqueued to priority restoration queue.");
     }
 
     // =========================================
@@ -460,7 +415,6 @@ public class ElectricitySystem {
     // =========================================
 
     private ArrayList<String> findAffectedAreas(String failedComponent) {
-
         ArrayList<String> affectedAreas = new ArrayList<>();
 
         if (failedComponent.equalsIgnoreCase("FD-ERD-01") || failedComponent.equalsIgnoreCase("DT-ERD-101")) {
@@ -497,16 +451,13 @@ public class ElectricitySystem {
     // =========================================
 
     private int countAffectedConsumers(ArrayList<String> affectedAreas) {
-
         int count = 0;
-
         for (int i = 0; i < consumerCount; i++) {
             String consumerArea = consumers[i].getArea();
             if (affectedAreas.contains(consumerArea)) {
                 count++;
             }
         }
-
         return count;
     }
 
@@ -515,7 +466,6 @@ public class ElectricitySystem {
     // =========================================
 
     private void updateConsumerPower(ArrayList<String> affectedAreas) {
-
         for (int i = 0; i < consumerCount; i++) {
             String area = consumers[i].getArea();
             if (affectedAreas.contains(area)) {
@@ -529,7 +479,6 @@ public class ElectricitySystem {
     // =========================================
 
     private void restoreConsumerPower(ArrayList<String> affectedAreas) {
-
         for (int i = 0; i < consumerCount; i++) {
             String area = consumers[i].getArea();
             if (affectedAreas.contains(area)) {
@@ -539,22 +488,81 @@ public class ElectricitySystem {
     }
 
     // =========================================
-    // PRIORITY CALCULATION
+    // EMERGENCY PRIORITY CALCULATION EVALUATION
     // =========================================
 
-    private String calculatePriority(int affectedConsumers) {
+    public static class OutagePriorityEvaluation {
+        private String priority;
+        private ArrayList<String> criticalFacilities;
+        private String priorityReason;
 
-        if (affectedConsumers >= 5) {
-            return "HIGH";
-        }
-        else if (affectedConsumers >= 4) {
-            return "HIGH";
-        }
-        else if (affectedConsumers >= 3) {
-            return "MEDIUM";
+        public OutagePriorityEvaluation(String priority, ArrayList<String> criticalFacilities, String priorityReason) {
+            this.priority = priority;
+            this.criticalFacilities = criticalFacilities != null ? criticalFacilities : new ArrayList<>();
+            this.priorityReason = priorityReason != null ? priorityReason : "";
         }
 
-        return "LOW";
+        public String getPriority() {
+            return priority;
+        }
+
+        public ArrayList<String> getCriticalFacilities() {
+            return criticalFacilities;
+        }
+
+        public String getPriorityReason() {
+            return priorityReason;
+        }
+    }
+
+    public OutagePriorityEvaluation evaluateOutagePriority(ArrayList<String> affectedAreas, int affectedConsumerCount) {
+        ArrayList<String> criticalFacilities = new ArrayList<>();
+        ArrayList<String> highFacilities = new ArrayList<>();
+        ArrayList<String> mediumFacilities = new ArrayList<>();
+        ArrayList<String> lowFacilities = new ArrayList<>();
+
+        int highestScore = 0; // 3 = HIGH, 2 = MEDIUM, 1 = LOW
+
+        for (int i = 0; i < consumerCount; i++) {
+            Consumer c = consumers[i];
+            if (affectedAreas.contains(c.getArea())) {
+                String level = c.getCriticalityLevel();
+                if (level == null || level.trim().isEmpty() || "DEFAULT".equalsIgnoreCase(level)) {
+                    level = Consumer.inferCriticalityLevel(c.getName(), c.getConsumerType());
+                }
+
+                if ("HIGH".equalsIgnoreCase(level) || "CRITICAL".equalsIgnoreCase(level)) {
+                    highFacilities.add(c.getName());
+                    criticalFacilities.add("[HIGH] " + c.getName());
+                    if (highestScore < 3) highestScore = 3;
+                } else if ("MEDIUM".equalsIgnoreCase(level)) {
+                    mediumFacilities.add(c.getName());
+                    criticalFacilities.add("[MEDIUM] " + c.getName());
+                    if (highestScore < 2) highestScore = 2;
+                } else {
+                    lowFacilities.add(c.getName());
+                    if (highestScore < 1) highestScore = 1;
+                }
+            }
+        }
+
+        String priority;
+        String priorityReason;
+
+        if (highestScore == 3) {
+            priority = "HIGH";
+            priorityReason = "HIGH PRIORITY: Essential facilities affected (" + String.join(", ", highFacilities)
+                + "). Priority assigned from highest consumer criticality level.";
+        } else if (highestScore == 2) {
+            priority = "MEDIUM";
+            priorityReason = "MEDIUM PRIORITY: Commercial, industrial, or educational facilities affected ("
+                + String.join(", ", mediumFacilities) + "). Priority assigned from highest consumer criticality level.";
+        } else {
+            priority = "LOW";
+            priorityReason = "LOW PRIORITY: Ordinary residential consumers and non-critical loads affected.";
+        }
+
+        return new OutagePriorityEvaluation(priority, criticalFacilities, priorityReason);
     }
 
     // =========================================
@@ -562,7 +570,6 @@ public class ElectricitySystem {
     // =========================================
 
     private void setNodeStatus(String nodeId, boolean status) {
-
         for (int i = 0; i < networkNodeCount; i++) {
             if (networkNodes[i].getNodeId().equalsIgnoreCase(nodeId)) {
                 networkNodes[i].setActive(status);
@@ -576,7 +583,6 @@ public class ElectricitySystem {
     // =========================================
 
     public void displayActiveOutages() {
-
         System.out.println();
         System.out.println("========== ACTIVE OUTAGES & RESTORATION QUEUE ==========");
 
@@ -584,7 +590,29 @@ public class ElectricitySystem {
 
         for (int i = 0; i < outageCount; i++) {
             if (!outages[i].getStatus().equals("RESTORED")) {
-                outages[i].display();
+                Outage o = outages[i];
+                int pos = outageQueue.getPosition(o);
+
+                System.out.println();
+                System.out.println("Outage ID: OUT-" + o.getOutageId());
+                System.out.println("Fault Location: " + o.getFailedComponent());
+                System.out.println("Affected Areas: " + o.getAffectedAreas());
+                System.out.println("Affected Consumers: " + o.getAffectedConsumers());
+                System.out.println("Priority Level: [" + o.getPriority() + "]");
+                if (o.getCriticalFacilities() != null && !o.getCriticalFacilities().isEmpty()) {
+                    System.out.println("CRITICAL FACILITIES AFFECTED: " + o.getCriticalFacilities());
+                }
+                if (o.getPriorityReason() != null && !o.getPriorityReason().isEmpty()) {
+                    System.out.println("Priority Reason: " + o.getPriorityReason());
+                }
+                if (pos > 0) {
+                    System.out.println("Queue Position: #" + pos + (pos == 1 ? " (Next for Dispatch)" : ""));
+                } else if ("IN PROGRESS".equalsIgnoreCase(o.getStatus())) {
+                    System.out.println("Queue Position: DISPATCHED (Crew On Site)");
+                }
+                System.out.println("Assigned Technician: " + o.getAssignedTechnician());
+                System.out.println("Current Status: " + o.getStatus());
+
                 found = true;
             }
         }
@@ -609,10 +637,15 @@ public class ElectricitySystem {
         Outage outage = outageQueue.dequeue();
 
         System.out.println();
-        System.out.println("========== PROCESSING OUTAGE FOR DISPATCH ==========");
-        System.out.println("Outage ID: " + outage.getOutageId());
+        System.out.println("========== PROCESSING HIGHEST PRIORITY OUTAGE FOR DISPATCH ==========");
+        System.out.println("Outage ID: OUT-" + outage.getOutageId());
         System.out.println("Failed Component: " + outage.getFailedComponent());
-        System.out.println("Priority: " + outage.getPriority());
+        System.out.println("Priority Level: [" + outage.getPriority() + "]");
+        if (outage.getCriticalFacilities() != null && !outage.getCriticalFacilities().isEmpty()) {
+            System.out.println("CRITICAL FACILITIES AFFECTED: " + outage.getCriticalFacilities());
+        }
+        System.out.println("Priority Reason: " + outage.getPriorityReason());
+        System.out.println("Affected Consumers: " + outage.getAffectedConsumers());
 
         // -----------------------------------------
         // Assign technician
@@ -622,15 +655,33 @@ public class ElectricitySystem {
         if (technician == null) {
             System.out.println();
             System.out.println("No field technician is currently available in this zone.");
-            // Re-enqueue outage
+            System.out.println("Outage OUT-" + outage.getOutageId() + " retained at top of priority queue.");
+            // Re-enqueue outage to maintain priority order
             outageQueue.enqueue(outage);
             return;
         }
 
         technician.setAvailable(false);
         outage.setAssignedTechnician(technician.getName());
+        outage.setAssignedTechnicianId(technician.getTechnicianId());
         outage.setStatus("IN PROGRESS");
         currentOutage = outage;
+
+        // -----------------------------------------
+        // Persist assignment to Supabase (Transaction)
+        // -----------------------------------------
+        try {
+            outageDAO.assignTechnicianTransaction(
+                outage.getOutageId(),
+                technician.getTechnicianId(),
+                technician.getName()
+            );
+        } catch (SQLException e) {
+            String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
+            System.err.println("[PowerTrack Database Error] Failed to persist dispatch to Supabase: " + sanitized);
+            outageQueue.enqueue(outage); // Retain outage in queue
+            throw new RuntimeException("Database error persisting dispatch to Supabase: " + sanitized, e);
+        }
 
         System.out.println();
         System.out.println("Technician Dispatched: " + technician.getName());
@@ -689,15 +740,12 @@ public class ElectricitySystem {
     // =========================================
 
     public void restoreOutage(int outageId) {
+        restoreOutage(outageId, null);
+    }
 
-        Outage outage = null;
+    public void restoreOutage(int outageId, String restorationDetails) {
 
-        for (int i = 0; i < outageCount; i++) {
-            if (outages[i].getOutageId() == outageId) {
-                outage = outages[i];
-                break;
-            }
-        }
+        Outage outage = findOutageById(outageId);
 
         if (outage == null) {
             System.out.println();
@@ -730,10 +778,15 @@ public class ElectricitySystem {
         // Make technician available
         // -----------------------------------------
         String technicianName = outage.getAssignedTechnician();
+        Integer technicianId = outage.getAssignedTechnicianId();
 
         for (int i = 0; i < technicianCount; i++) {
-            if (technicians[i].getName().equals(technicianName)) {
+            if (technicians[i] != null && (technicians[i].getName().equals(technicianName)
+                    || (technicianId != null && technicians[i].getTechnicianId() == technicianId))) {
                 technicians[i].setAvailable(true);
+                if (technicianId == null) {
+                    technicianId = technicians[i].getTechnicianId();
+                }
                 break;
             }
         }
@@ -742,7 +795,31 @@ public class ElectricitySystem {
         // Update outage
         // -----------------------------------------
         outage.setStatus("RESTORED");
-        currentOutage = null;
+        outage.setRestoredAt(new java.sql.Timestamp(System.currentTimeMillis()));
+        if (currentOutage != null && currentOutage.getOutageId() == outageId) {
+            currentOutage = null;
+        }
+
+        // -----------------------------------------
+        // Persist restoration to Supabase (Transaction)
+        // -----------------------------------------
+        try {
+            String details = (restorationDetails != null && !restorationDetails.trim().isEmpty())
+                ? restorationDetails.trim()
+                : ("Component " + outage.getFailedComponent() + " re-energized. Normal power supply restored.");
+            outageDAO.restoreOutageTransaction(
+                outageId,
+                outage.getFailedComponent(),
+                outage.getAffectedAreas(),
+                technicianId,
+                technicianName,
+                details
+            );
+        } catch (SQLException e) {
+            String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
+            System.err.println("[PowerTrack Database Error] Failed to persist restoration to Supabase: " + sanitized);
+            throw new RuntimeException("Database error persisting restoration to Supabase: " + sanitized, e);
+        }
 
         System.out.println();
         System.out.println("Network Component: ACTIVE");
@@ -750,6 +827,63 @@ public class ElectricitySystem {
         System.out.println("Technician " + technicianName + " -> AVAILABLE");
         System.out.println();
         System.out.println("Outage OUT-" + outageId + " -> RESTORED & ARCHIVED");
+    }
+
+    // =========================================
+    // DIRECT TECHNICIAN ASSIGNMENT
+    // =========================================
+
+    public Outage assignTechnicianToOutage(int outageId, int technicianId) {
+        Outage outage = findOutageById(outageId);
+        if (outage == null) {
+            return null;
+        }
+
+        Technician technician = findTechnicianById(technicianId);
+        if (technician == null) {
+            return null;
+        }
+
+        technician.setAvailable(false);
+        outage.setAssignedTechnician(technician.getName());
+        outage.setAssignedTechnicianId(technician.getTechnicianId());
+        outage.setStatus("IN PROGRESS");
+        currentOutage = outage;
+
+        // Remove from priority queue
+        outageQueue.remove(outage);
+
+        try {
+            outageDAO.assignTechnicianTransaction(
+                outage.getOutageId(),
+                technician.getTechnicianId(),
+                technician.getName()
+            );
+        } catch (SQLException e) {
+            String sanitized = DatabaseConnection.sanitizeErrorMessage(e.getMessage());
+            System.err.println("[PowerTrack Database Error] Failed to persist assignment to Supabase: " + sanitized);
+            throw new RuntimeException("Database error persisting assignment to Supabase: " + sanitized, e);
+        }
+
+        return outage;
+    }
+
+    public Outage findOutageById(int outageId) {
+        for (int i = 0; i < outageCount; i++) {
+            if (outages[i] != null && outages[i].getOutageId() == outageId) {
+                return outages[i];
+            }
+        }
+        return null;
+    }
+
+    public Technician findTechnicianById(int technicianId) {
+        for (int i = 0; i < technicianCount; i++) {
+            if (technicians[i] != null && technicians[i].getTechnicianId() == technicianId) {
+                return technicians[i];
+            }
+        }
+        return null;
     }
 
     // =========================================
@@ -772,7 +906,7 @@ public class ElectricitySystem {
     }
 
     // =========================================
-    // QUEUE DISPLAY
+    // QUEUE DISPLAY & ACCESSORS
     // =========================================
 
     public void displayOutageQueue() {
@@ -781,5 +915,44 @@ public class ElectricitySystem {
         System.out.println("========== OUTAGE QUEUE STATUS ==========");
         System.out.println("Queue Size: " + outageQueue.size());
         outageQueue.display();
+    }
+
+    public int getQueuePosition(Outage outage) {
+        if (outage == null) {
+            return -1;
+        }
+        return outageQueue.getPosition(outage);
+    }
+
+    public Queue<Outage> getOutageQueue() {
+        return outageQueue;
+    }
+
+    public boolean isDatabaseConnected() {
+        return databaseConnected;
+    }
+
+    public StatsDAO getStatsDAO() {
+        return statsDAO;
+    }
+
+    public OutageDAO getOutageDAO() {
+        return outageDAO;
+    }
+
+    public ConsumerDAO getConsumerDAO() {
+        return consumerDAO;
+    }
+
+    public NetworkDAO getNetworkDAO() {
+        return networkDAO;
+    }
+
+    public TechnicianDAO getTechnicianDAO() {
+        return technicianDAO;
+    }
+
+    public Outage getCurrentOutage() {
+        return currentOutage;
     }
 }

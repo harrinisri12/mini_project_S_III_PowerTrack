@@ -1,0 +1,13 @@
+# Environment and secret credentials
+.env
+*.env
+*.env.local
+
+# Java class files
+*.class
+backend/**/*.class
+
+# IDE and temporary files
+.vscode/
+.idea/
+*.log
